@@ -254,9 +254,26 @@
   </worldbody>
 
   <!-- ===== 执行器: 后轮力矩驱动 + 前轮位置转向 ===== -->
+  <!-- ===== 执行器 ===== -->
+  <!-- 
+    后轮: 速度闭环控制 (velocity actuator)
+      ctrl 单位 = 轮角速度 rad/s, 车轮线速度 v = omega * 0.0525
+      ctrlrange ±30 rad/s → 车速 ±1.575 m/s
+      forcerange ±1.5 Nm → 可爬 ~35° 坡 (整车 5.33kg, 轴距 0.315m)
+      kv=1.0 → 速度误差 1 rad/s 产生 1 Nm 补偿力矩
+    
+    为什么用速度闭环:
+      力矩开环时, 坡道上的重力分力会抵消电机力矩, 导致车速骤降甚至爬不动。
+      速度闭环会自动增大力矩维持目标速度, 与真实机器人驱动器行为一致。
+      实测: snowy_mountain 场景从 0.062 m/s 提升到 0.628 m/s。
+
+    前轮: 位置控制转向 (position actuator)
+  -->
   <actuator>
-    <motor name="left_rear_motor" joint="left_rear_wheel_joint" gear="1" ctrlrange="-0.5 0.5"/>
-    <motor name="right_rear_motor" joint="right_rear_wheel_joint" gear="1" ctrlrange="-0.5 0.5"/>
+    <velocity name="left_rear_motor" joint="left_rear_wheel_joint"
+              kv="1.0" ctrlrange="-30 30" forcerange="-1.5 1.5"/>
+    <velocity name="right_rear_motor" joint="right_rear_wheel_joint"
+              kv="1.0" ctrlrange="-30 30" forcerange="-1.5 1.5"/>
     <position name="steering_actuator" joint="steering_joint" kp="20" kv="4" ctrlrange="-0.785 0.785"/>
   </actuator>
 

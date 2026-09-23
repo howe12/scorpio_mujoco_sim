@@ -147,11 +147,13 @@ def simple_controller(model, data, goal_pos=None):
             # Slow down near obstacles
             speed_factor *= min(1.0, min_front_dist / 2.0)
     
-    # Speed: reduce when turning, slow near goal (unit: Nm, 0.15≈vmax)
+    # 目标车速 (m/s): 转弯减速 + 接近目标减速
     speed_factor = max(0.1, speed_factor * (1.0 - abs(yaw_error) * 0.6 / np.pi))
     if dist < 3.0:
         speed_factor *= max(0.1, dist / 3.0)
-    throttle = np.clip(speed_factor * 0.15, 0, 0.25)
+    v_cmd = np.clip(speed_factor * 0.6, 0.0, 1.0)     # m/s
+    omega = v_cmd / 0.0525                             # rad/s
+    throttle = omega
     
     data.ctrl[0] = throttle
     data.ctrl[1] = throttle
@@ -171,13 +173,16 @@ class KeyboardController:
     ctrl=0.8 Nm → v≈0.33 m/s (超速，留余量)
     """
 
+    # 轮半径: 车速 v = omega * WHEEL_R,  omega = v / WHEEL_R
+    WHEEL_R = 0.0525
+
     def __init__(self, model):
         self.model = model
-        self.throttle = 0.0      # Nm
+        self.throttle = 0.0      # m/s (目标车速)
         self.steer = 0.0         # rad
-        self.max_throttle = 0.25  # Nm (ctrl=0.15→vmax=0.25m/s)
+        self.max_throttle = 1.0   # m/s (模型上限 1.575 m/s)
         self.max_steer = DELTA_MAX
-        self.throttle_step = 0.01  # Nm 每按一次 (15次到 vmax)
+        self.throttle_step = 0.1  # m/s 每按一次 (10次到 1.0 m/s)
         self.steer_step = 0.08    # rad 每按一次 (~4.6°)
         self.mode = "manual"
         self._quit = False
@@ -218,8 +223,10 @@ class KeyboardController:
         self._listener.start()
 
     def apply(self, data):
-        data.ctrl[0] = self.throttle
-        data.ctrl[1] = self.throttle
+        """将目标车速 (m/s) 转为轮角速度 (rad/s) 写入执行器"""
+        omega = self.throttle / self.WHEEL_R
+        data.ctrl[0] = omega
+        data.ctrl[1] = omega
         data.ctrl[2] = self.steer
 
 
@@ -272,7 +279,7 @@ def run_interactive(terrain_name):
                 dist = -1
             mode_tag = "MANUAL" if kb.mode == "manual" else "AUTO"
             print(f"\r  [{mode_tag}] t={data.time:5.1f}s | "
-                  f"thr={kb.throttle:+.3f}Nm str={np.degrees(kb.steer):+5.1f}° | "
+                  f"v_cmd={kb.throttle:+.2f}m/s str={np.degrees(kb.steer):+5.1f}° | "
                   f"pos=({pos[0]:.2f},{pos[1]:.2f}) yaw={yaw:+.0f}° | "
                   f"goal={dist:.1f}m   ", end='', flush=True)
 
