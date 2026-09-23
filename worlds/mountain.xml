@@ -1,0 +1,237 @@
+<mujoco model="seb_naver_mountain">
+  <compiler angle="radian" autolimits="true" meshdir="../models/meshes"/>
+  <visual>
+    <global offwidth="1280" offheight="960"/>
+  </visual>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4">
+    <flag contact="enable"/>
+  </option>
+  <size nconmax="500" njmax="1000"/>
+  <default>
+    <joint damping="0.3" frictionloss="0.02"/>
+    <geom contype="1" conaffinity="1" friction="0.9 0.02 0.005"/>
+  </default>
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.4 0.5 0.6" rgb2="0.0 0.0 0.1" width="512" height="512"/>
+    
+    
+    
+    
+
+    <material name="white_plastic" rgba="0.95 0.95 0.95 1" specular="0.3" shininess="0.5"/>
+    <material name="black_rubber" rgba="0.12 0.12 0.12 1" specular="0.05" shininess="0.05"/>
+    <material name="dark_grey" rgba="0.35 0.35 0.38 1"/>
+    <material name="aluminum" rgba="0.6 0.6 0.62 1" specular="0.5" shininess="0.7"/>
+    <material name="sensor_black" rgba="0.08 0.08 0.08 1"/>
+
+    <mesh name="body_mesh" file="scorpio.obj"/>
+    <mesh name="left_wheel_mesh" file="left_wheel.obj"/>
+    <mesh name="right_wheel_mesh" file="right_wheel.obj"/>
+    <mesh name="d435_mesh" file="d435.obj"/>
+    <mesh name="ydlidar_g6_mesh" file="ydlidar_g6.obj"/>
+  
+    <hfield name="terrain_hf" nrow="100" ncol="100" size="10.0 10.0 2.9111224709421157 0.001"/>
+    
+  </asset>
+  <worldbody>
+    <light name="sun" pos="10 10 20" dir="-0.5 -0.5 -1" diffuse="0.9 0.9 0.9" castshadow="true"/>
+    <light name="fill" pos="-5 -5 10" dir="0.5 0.5 -1" diffuse="0.3 0.3 0.3"/>
+    <geom name="terrain" type="hfield" hfield="terrain_hf" pos="10.0 10.0 0" rgba='0.35 0.4 0.25 1' contype="1" conaffinity="1" friction="0.8 0.02 0.01"/>
+    <body name="goal_marker" pos="16.00 16.00 2.411">
+      <geom name="goal_visual" type="cylinder" size="0.3 0.5" rgba="0.1 0.8 0.1 0.6" contype="0" conaffinity="0" group="3"/>
+      <site name="goal_site" pos="0 0 0"/>
+    </body>
+    <body name="start_marker" pos="2.00 2.00 0.646">
+      <geom name="start_visual" type="cylinder" size="0.3 0.5" rgba="0.1 0.3 0.9 0.6" contype="0" conaffinity="0" group="3"/>
+    </body>
+    <!-- Scorpio Robot (阿克曼转向, 与 models/scorpio.xml 同一模型) -->
+    <body name="base_footprint" pos="2.00 2.00 0.646">
+      <freejoint name="base_freejoint"/>
+
+      <body name="base_link" pos="0 0 0">
+
+        <!-- ===== 车体 (room_base_link) ===== -->
+        <!-- URDF: joint origin (0,0,0), mesh 顶点自带 z=[0.0325, 0.3101] -->
+        <body name="room_base_link" pos="0 0 0">
+          <inertial pos="0 0 0.17" mass="3.5"
+                    fullinertia="0.035 0.035 0.05 0 0 0"/>
+          <!-- 视觉 mesh: pos 必须为 0, mesh 自带正确坐标 -->
+          <geom name="body_visual" type="mesh" mesh="body_mesh"
+                pos="0 0 0" material="white_plastic"
+                contype="0" conaffinity="0" group="1"/>
+          <!-- 碰撞体: 贴合外壳主体的保守包围盒
+               外壳 mesh: x=[-0.2215,0.2579] y=[-0.1021,0.1021] z=[0.0325,0.3101]
+               实际外壳在 x>0.20 处已下降 (顶面 z≈0.12), 故 x 收窄到 ±0.211
+               y 收窄到 ±0.06 以避开轮子 (y=±0.0928, r=0.022) -->
+          <geom name="body_collision" type="box"
+                pos="0 0 0.1463" size="0.211 0.095 0.1138"
+                rgba="1 1 1 0" contype="1" conaffinity="4"/>
+        </body>
+
+        <!-- ===== IMU ===== -->
+        <!-- URDF: origin xyz="0.16 0.04 0.175" -->
+        <site name="imu_site" pos="0.16 0.04 0.175" euler="0 0 -3.14159"/>
+
+        <!-- ===== 后轮 (驱动) ===== -->
+        <!-- URDF: left_back_wheel  (-0.1575,  0.0928, 0.0525) -->
+        <body name="left_rear_wheel" pos="-0.1575 0.0928 0.0525">
+          <joint name="left_rear_wheel_joint" type="hinge" axis="0 1 0"
+                 damping="0.01" frictionloss="0.001"/>
+          <inertial pos="0 0 0" mass="0.3"
+                    fullinertia="0.0005 0.0005 0.0003 0 0 0"/>
+          <geom name="lr_wheel_visual" type="mesh" mesh="left_wheel_mesh"
+                pos="0 0 0" material="black_rubber" contype="0" conaffinity="0"/>
+          <geom name="lr_wheel_collision" type="cylinder"
+                size="0.0525 0.022" quat="0.707 0.707 0 0"
+                material="black_rubber" friction="1.2 0.01 0.005" contype="1" conaffinity="4"/>
+        </body>
+
+        <!-- URDF: right_back_wheel (-0.1575, -0.0928, 0.0525) -->
+        <body name="right_rear_wheel" pos="-0.1575 -0.0928 0.0525">
+          <joint name="right_rear_wheel_joint" type="hinge" axis="0 1 0"
+                 damping="0.01" frictionloss="0.001"/>
+          <inertial pos="0 0 0" mass="0.3"
+                    fullinertia="0.0005 0.0005 0.0003 0 0 0"/>
+          <geom name="rr_wheel_visual" type="mesh" mesh="right_wheel_mesh"
+                pos="0 0 0" material="black_rubber" contype="0" conaffinity="0"/>
+          <geom name="rr_wheel_collision" type="cylinder"
+                size="0.0525 0.022" quat="0.707 0.707 0 0"
+                material="black_rubber" friction="1.2 0.01 0.005" contype="1" conaffinity="4"/>
+        </body>
+
+        <!-- ===== 前轮 (转向) ===== -->
+        <!-- 转向体位于前轴中心 (0.1575, 0, 0.0525) -->
+        <body name="steering_assembly" pos="0.1575 0 0.0525">
+          <joint name="steering_joint" type="hinge" axis="0 0 1"
+                 damping="0.5" frictionloss="0.02" range="-0.785 0.785"/>
+          <inertial pos="0 0 0" mass="0.15"
+                    fullinertia="0.0001 0.0001 0.0001 0 0 0"/>
+
+          <!-- URDF: left_front_wheel (0.1575, 0.0928, 0.0525) → 相对转向体 (0, 0.0928, 0) -->
+          <body name="left_front_wheel" pos="0 0.0928 0">
+            <joint name="left_front_wheel_joint" type="hinge" axis="0 1 0"
+                   damping="0.01" frictionloss="0.001"/>
+            <inertial pos="0 0 0" mass="0.3"
+                      fullinertia="0.0005 0.0005 0.0003 0 0 0"/>
+            <geom name="lf_wheel_visual" type="mesh" mesh="left_wheel_mesh"
+                  pos="0 0 0" material="black_rubber" contype="0" conaffinity="0"/>
+            <geom name="lf_wheel_collision" type="cylinder"
+                  size="0.0525 0.022" quat="0.707 0.707 0 0"
+                  material="black_rubber" friction="1.2 0.01 0.005" contype="1" conaffinity="4"/>
+          </body>
+
+          <!-- URDF: right_front_wheel (0.1575, -0.0928, 0.0525) -->
+          <body name="right_front_wheel" pos="0 -0.0928 0">
+            <joint name="right_front_wheel_joint" type="hinge" axis="0 1 0"
+                   damping="0.01" frictionloss="0.001"/>
+            <inertial pos="0 0 0" mass="0.3"
+                      fullinertia="0.0005 0.0005 0.0003 0 0 0"/>
+            <geom name="rf_wheel_visual" type="mesh" mesh="right_wheel_mesh"
+                  pos="0 0 0" material="black_rubber" contype="0" conaffinity="0"/>
+            <geom name="rf_wheel_collision" type="cylinder"
+                  size="0.0525 0.022" quat="0.707 0.707 0 0"
+                  material="black_rubber" friction="1.2 0.01 0.005" contype="1" conaffinity="4"/>
+          </body>
+        </body>
+
+        <!-- ===== YDLidar G6 360° 激光雷达 ===== -->
+        <!--
+        型号: YDLidar G6 (EAI)
+        规格 (NXROBO 官方 + ydlidar_g6.yaml):
+          量程: 0.12 ~ 16.0 m
+          扫描角: 360°
+          扫描频率: 12 Hz
+          角度分辨率: 0.5° (720 点)
+          外形: 82.8 × 75.4 × 42.9 mm
+          质量: 0.41 kg
+        
+        安装位置:
+          车体顶部平平台 (mesh 实测 z ≈ 0.250, x ∈ [-0.09, 0.12], y ∈ [-0.088, 0.088])
+          雷达底座放在平台上, 扫描中心在 z = 0.250 + 0.03172 = 0.2817
+          该高度高于车体顶面 3.2cm, 360° 视野无遮挡
+        
+        注: URDF 中 lidar_link 在 z=0.08 (第三方 ydlidar 驱动包的默认值),
+            该高度位于车体内部, 无法扫描环境; 此处按实际车顶安装平台放置。
+        -->
+        <body name="lidar_link" pos="0 0 0.250">
+          <inertial pos="0 0 0.02" mass="0.41"
+                    fullinertia="6.8e-5 1.3e-4 7.2e-5 0 0 0"/>
+          <!-- YDLidar G6 实际外形网格 (底座在 z=0, 高 42.9mm) -->
+          <geom name="lidar_body" type="mesh" mesh="ydlidar_g6_mesh"
+                material="aluminum" contype="0" conaffinity="0"/>
+          <!-- 激光扫描中心 (对应 URDF laser_frame: lidar_link + 0.03172) -->
+          <site name="lidar_site" pos="0 0 0.03172" euler="0 0 0"/>
+        </body>
+
+        <!-- ===== Intel RealSense D435 深度相机 ===== -->
+        <!-- 实际挂载配置 (realsense2_description/urdf/scorpio_d435_camera.urdf.xacro):
+               camera_bottom_screw_frame = base_link + (0.16, 0, 0.2295)
+               camera_link = bottom_screw + (0.0106, 0.0175, 0.0125) = (0.1706, 0.0175, 0.242)
+                 其中 0.0106 = 0.0149 - 0.0001 - 0.0042
+               camera_color_frame = camera_link + (0, 0.015, 0) -->
+        <body name="d435_camera" pos="0.1706 0.0175 0.242">
+          <inertial pos="0 0 0" mass="0.072"
+                    fullinertia="3.9e-3 5.0e-4 3.9e-3 0 0 0"/>
+
+          <!-- D435 外壳 mesh
+               URDF visual origin: xyz=(0.0043, -0.0175, 0), rpy=(pi/2, 0, pi/2)
+               quat(0.5,0.5,0.5,0.5) 等价于该 rpy, 使 90mm 宽度沿 Y 轴 -->
+          <geom name="d435_visual" type="mesh" mesh="d435_mesh"
+                pos="0.0043 -0.0175 0" quat="0.5 0.5 0.5 0.5"
+                material="aluminum" contype="0" conaffinity="0"/>
+          <!-- D435 碰撞体: URDF collision size=(0.02505, 0.090, 0.025) -->
+          <geom name="d435_collision" type="box" size="0.012525 0.045 0.0125"
+                pos="0 -0.0175 0" rgba="1 1 1 0"
+                contype="1" conaffinity="4"/>
+
+          <!-- MuJoCo 相机放置在前端玻璃处 (camera_link + (0.005, -0.0175, 0))
+               URDF 中 camera_depth_frame 位于 camera_link 原点, 即镜片后方 4.3mm,
+               位于相机外壳内部 → 直接在此渲染会被自身 mesh 遮挡。
+               真实相机成像面在玻璃处, 故相机光心放在前端玻璃 (物理上等价, 偏移 5mm)。 -->
+          <!-- 深度相机 (光心朝前 +X) -->
+          <camera name="d435_depth" pos="0.005 -0.0175 0"
+                  quat="0.5 0.5 0.5 0.5" fovy="64" resolution="640 480"/>
+          <!-- RGB 相机 (camera_color_frame = depth + (0, 0.015, 0)) -->
+          <camera name="d435_rgb" pos="0.005 -0.0025 0"
+                  quat="0.5 0.5 0.5 0.5" fovy="42" resolution="640 480"/>
+
+          <!-- 深度测距 site (rangefinder 敏感轴 = site 的 +Z), 同样置于玻璃处 -->
+          <site name="d435_depth_site" pos="0.005 -0.0175 0" euler="0 1.5708 0"/>
+          <!-- 双目红外基线 50mm: infra1 居中, infra2 在 y=-0.05 -->
+          <site name="d435_left_ir_site" pos="0.005 -0.0175 0" euler="0 1.5708 0"/>
+          <site name="d435_right_ir_site" pos="0.005 -0.0675 0" euler="0 1.5708 0"/>
+        </body>
+
+      </body>
+    </body>
+    
+  </worldbody>
+  <actuator>
+    
+    <motor name="left_rear_motor" joint="left_rear_wheel_joint" gear="1" ctrlrange="-0.5 0.5"/>
+    <motor name="right_rear_motor" joint="right_rear_wheel_joint" gear="1" ctrlrange="-0.5 0.5"/>
+    <position name="steering_actuator" joint="steering_joint" kp="20" kv="4" ctrlrange="-0.785 0.785"/>
+  
+  </actuator>
+  <sensor>
+    
+    <accelerometer name="imu_accel" site="imu_site"/>
+    <gyro name="imu_gyro" site="imu_site"/>
+    <jointpos name="enc_left_rear" joint="left_rear_wheel_joint"/>
+    <jointpos name="enc_right_rear" joint="right_rear_wheel_joint"/>
+    <jointvel name="vel_left_rear" joint="left_rear_wheel_joint"/>
+    <jointvel name="vel_right_rear" joint="right_rear_wheel_joint"/>
+    <jointpos name="enc_left_front" joint="left_front_wheel_joint"/>
+    <jointpos name="enc_right_front" joint="right_front_wheel_joint"/>
+    <jointpos name="steering_angle" joint="steering_joint"/>
+    <framepos name="base_pos" objtype="body" objname="base_link"/>
+    <framequat name="base_quat" objtype="body" objname="base_link"/>
+    <framelinvel name="base_linvel" objtype="body" objname="base_link"/>
+    <frameangvel name="base_angvel" objtype="body" objname="base_link"/>
+    <rangefinder name="d435_depth_center" site="d435_depth_site"/>
+    <rangefinder name="d435_depth_left" site="d435_left_ir_site"/>
+    <rangefinder name="d435_depth_right" site="d435_right_ir_site"/>
+  
+    <framepos name="goal_pos" objtype="site" objname="goal_site"/>
+  </sensor>
+</mujoco>

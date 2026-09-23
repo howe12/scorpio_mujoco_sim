@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# MuJoCo 日志
+MUJOCO_LOG.TXT
+mujoco_log*.txt
+
+# 编辑器
+.vscode/
+.idea/
+*~
+*.swp
+
+# 编译产物 (ROS2 colcon)
+build/
+install/
+log/
+
+# 系统文件
+.DS_Store
+Thumbs.db

@@ -1,0 +1,166 @@
+<mujoco model="car_like_robot">
+  <!--
+    Car-like (Ackermann steering) robot for SEB-Naver simulation.
+    
+    Paper parameters:
+      Wheelbase Lw = 0.5m, Track width = 0.4m
+      δmax = 0.785 rad, vmlon = 1.0 m/s
+      amlon = 5.0 m/s², amlat = 10.0 m/s²
+      φmax = 0.52 rad, Body mass ~20kg
+      
+    Layout (top view):
+      FL ---- FR     (front axle, steering)
+        |    |
+        | Lw |       (wheelbase = 0.5m)
+        |    |
+      RL ---- RR     (rear axle, drive)
+      
+    Coordinate: X forward, Y left, Z up
+    Rear axle at x=0, front axle at x=0.5
+    Wheel centers at y=±0.2 (track=0.4m)
+    Wheel radius = 0.1m → ground clearance at axle = 0.1m
+  -->
+
+  <compiler angle="radian" autolimits="true"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4">
+    <flag contact="enable"/>
+  </option>
+
+  <size nconmax="200" njmax="400"/>
+
+  <default>
+    <joint damping="0.3" frictionloss="0.02"/>
+    <geom contype="1" conaffinity="1" friction="0.9 0.02 0.005"/>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.4 0.5 0.6" rgb2="0.0 0.0 0.1" width="512" height="512"/>
+    <material name="body_white" rgba="0.9 0.9 0.9 1"/>
+    <material name="tire_black" rgba="0.12 0.12 0.12 1"/>
+    <material name="chassis_dark" rgba="0.2 0.2 0.25 1"/>
+    <material name="sensor_black" rgba="0.08 0.08 0.08 1"/>
+    <material name="lidar_blue" rgba="0.1 0.2 0.5 1"/>
+  </asset>
+
+  <worldbody>
+    <light name="sun" pos="5 5 10" dir="-1 -1 -2" diffuse="0.8 0.8 0.8" castshadow="true"/>
+    <light name="ambient" pos="0 0 5" dir="0 0 -1" diffuse="0.4 0.4 0.4"/>
+
+    <!-- Robot placed so wheels touch ground (z=0) -->
+    <!-- Wheel center at z=0.1 (radius=0.1), base_footprint at z=0.1 -->
+    <body name="base_footprint" pos="0 0 0.1">
+      <freejoint name="base_freejoint"/>
+
+      <body name="base_link" pos="0 0 0">
+        
+        <!-- Chassis box centered between axles -->
+        <!-- Center at x=0.25 (midpoint of wheelbase), z=0.08 above axle -->
+        <inertial pos="0.25 0 0.08" mass="15.0"
+                  fullinertia="0.8 0.5 1.2 0 0 0"/>
+        <geom name="chassis_lower" type="box" size="0.3 0.18 0.06"
+              pos="0.25 0 0.08" material="chassis_dark"
+              contype="0" conaffinity="0"/>
+        <geom name="chassis_upper" type="box" size="0.22 0.16 0.05"
+              pos="0.25 0 0.18" material="body_white"
+              contype="0" conaffinity="0"/>
+        <!-- Collision hull (narrow enough to avoid wheel spheres at y=±0.2, r=0.1) -->
+        <geom name="chassis_col" type="box" size="0.22 0.09 0.12"
+              pos="0.25 0 0.12" material="chassis_dark"/>
+
+        <!-- IMU -->
+        <site name="imu_site" pos="0.25 0 0.15"/>
+
+        <!-- LiDAR (Livox Mid-360) -->
+        <body name="lidar_mount" pos="0.35 0 0.28">
+          <inertial pos="0 0 0" mass="0.3"
+                    fullinertia="0.0002 0.0002 0.0002 0 0 0"/>
+          <geom name="lidar_body" type="cylinder" size="0.03 0.025"
+                material="lidar_blue" contype="0" conaffinity="0"/>
+          <site name="lidar_site" pos="0 0 0.03"/>
+        </body>
+
+        <!-- Camera -->
+        <body name="camera_mount" pos="0.45 0 0.22">
+          <inertial pos="0 0 0" mass="0.1"
+                    fullinertia="0.00005 0.00005 0.00005 0 0 0"/>
+          <geom name="camera_body" type="box" size="0.025 0.012 0.012"
+                material="sensor_black" contype="0" conaffinity="0"/>
+          <camera name="rgb_camera" pos="0 0 0" fovy="60" resolution="640 480"/>
+          <camera name="depth_camera" pos="0 0.02 0" fovy="60" resolution="640 480"/>
+        </body>
+
+        <!-- ===== REAR LEFT WHEEL (drive) ===== -->
+        <body name="rear_left_wheel" pos="0 0.2 0">
+          <joint name="rl_axle" type="hinge" axis="0 1 0"
+                 damping="0.2" frictionloss="0.03"/>
+          <inertial pos="0 0 0" mass="1.0"
+                    fullinertia="0.002 0.002 0.001 0 0 0"/>
+          <geom name="rl_tire" type="sphere" size="0.1"
+                material="tire_black" friction="1.5 0.02 0.01"/>
+        </body>
+
+        <!-- ===== REAR RIGHT WHEEL (drive) ===== -->
+        <body name="rear_right_wheel" pos="0 -0.2 0">
+          <joint name="rr_axle" type="hinge" axis="0 1 0"
+                 damping="0.2" frictionloss="0.03"/>
+          <inertial pos="0 0 0" mass="1.0"
+                    fullinertia="0.002 0.002 0.001 0 0 0"/>
+          <geom name="rr_tire" type="sphere" size="0.1"
+                material="tire_black" friction="1.5 0.02 0.01"/>
+        </body>
+
+        <!-- ===== FRONT STEERING ASSEMBLY ===== -->
+        <body name="steering_assembly" pos="0.5 0 0">
+          <joint name="steering_joint" type="hinge" axis="0 0 1"
+                 damping="2.0" frictionloss="0.3" range="-0.785 0.785"/>
+          <inertial pos="0 0 0" mass="0.3"
+                    fullinertia="0.0003 0.0003 0.0003 0 0 0"/>
+
+          <!-- Front Left Wheel (passive roll) -->
+          <body name="front_left_wheel" pos="0 0.2 0">
+            <joint name="fl_axle" type="hinge" axis="0 1 0"
+                   damping="0.1" frictionloss="0.01"/>
+            <inertial pos="0 0 0" mass="0.5"
+                      fullinertia="0.001 0.001 0.0005 0 0 0"/>
+            <geom name="fl_tire" type="sphere" size="0.1"
+                  material="tire_black" friction="1.5 0.02 0.01"/>
+          </body>
+
+          <!-- Front Right Wheel (passive roll) -->
+          <body name="front_right_wheel" pos="0 -0.2 0">
+            <joint name="fr_axle" type="hinge" axis="0 1 0"
+                   damping="0.1" frictionloss="0.01"/>
+            <inertial pos="0 0 0" mass="0.5"
+                      fullinertia="0.001 0.001 0.0005 0 0 0"/>
+            <geom name="fr_tire" type="sphere" size="0.1"
+                  material="tire_black" friction="1.5 0.02 0.01"/>
+          </body>
+        </body>
+
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="rl_motor" joint="rl_axle" gear="1" ctrlrange="-15 15"/>
+    <motor name="rr_motor" joint="rr_axle" gear="1" ctrlrange="-15 15"/>
+    <position name="steer_act" joint="steering_joint" kp="80" kv="8"
+              ctrlrange="-0.785 0.785"/>
+  </actuator>
+
+  <sensor>
+    <accelerometer name="imu_accel" site="imu_site"/>
+    <gyro name="imu_gyro" site="imu_site"/>
+    <jointpos name="enc_rl" joint="rl_axle"/>
+    <jointpos name="enc_rr" joint="rr_axle"/>
+    <jointvel name="vel_rl" joint="rl_axle"/>
+    <jointvel name="vel_rr" joint="rr_axle"/>
+    <jointpos name="steer_angle" joint="steering_joint"/>
+    <framepos name="base_pos" objtype="body" objname="base_link"/>
+    <framequat name="base_quat" objtype="body" objname="base_link"/>
+    <framelinvel name="base_linvel" objtype="body" objname="base_link"/>
+    <frameangvel name="base_angvel" objtype="body" objname="base_link"/>
+  </sensor>
+
+</mujoco>

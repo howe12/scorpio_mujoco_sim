@@ -1,0 +1,14 @@
+# Scorpio MuJoCo 仿真 - Python 依赖
+# 安装: pip install -r requirements.txt
+
+# 物理仿真引擎 (必需)
+mujoco>=3.0
+
+# 数值计算 (必需)
+numpy>=1.20
+
+# 图像编码 - 浏览器可视化用 (可选)
+Pillow>=9.0
+
+# 全局键盘监听 - 键盘控制用 (可选)
+pynput>=1.7
