@@ -30,8 +30,6 @@ A_MAX_LAT = 10.0     # max lateral acceleration (m/s²)
 PHI_MAX = 0.52       # max pitch/roll (rad, ~30°)
 WHEELBASE = 0.5      # m
 
-# 自动导航模式下最近一次的目标车速 (供状态栏显示)
-AUTO_LAST_V = [0.0]
 
 
 def load_world(terrain_name):
@@ -155,8 +153,7 @@ def simple_controller(model, data, goal_pos=None):
     if dist < 3.0:
         speed_factor *= max(0.1, dist / 3.0)
     v_cmd = np.clip(speed_factor * 0.4, 0.0, 0.5)     # m/s (限 0.5, 稳)
-    AUTO_LAST_V[0] = v_cmd
-    omega = v_cmd / 0.0525                             # rad/s
+        omega = v_cmd / 0.0525                             # rad/s
     throttle = omega
     
     data.ctrl[0] = throttle
@@ -340,13 +337,19 @@ def run_interactive(terrain_name):
             mode_tag = "MANUAL" if kb.mode == "manual" else "AUTO"
             # 实际车身速度
             v_act = float(np.linalg.norm(data.qvel[:2]))
-            v_show = kb.effective_throttle if kb.mode == "manual" else AUTO_LAST_V[0]
+            v_show = kb.effective_throttle
             print(f"\r  [{mode_tag}] t={data.time:5.1f}s | "
                   f"v={v_act:4.2f}m/s(令{v_show:+.2f}) str={np.degrees(kb.steer):+5.1f}° | "
                   f"pos=({pos[0]:.2f},{pos[1]:.2f}) yaw={yaw:+.0f}° | "
                   f"goal={dist:.1f}m   ", end='', flush=True)
 
     viewer.close()
+
+    # 强制退出: pynput 监听器和 GLX 清理都会卡住正常退出
+    import os as _os
+    if kb._listener is not None:
+        kb._listener.stop()
+    _os._exit(0)
 
 
 def run_headless_benchmark():
