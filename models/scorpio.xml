@@ -274,7 +274,7 @@
               kv="1.0" ctrlrange="-30 30" forcerange="-1.5 1.5"/>
     <velocity name="right_rear_motor" joint="right_rear_wheel_joint"
               kv="1.0" ctrlrange="-30 30" forcerange="-1.5 1.5"/>
-    <position name="steering_actuator" joint="steering_joint" kp="20" kv="4" ctrlrange="-0.785 0.785"/>
+    <position name="steering_actuator" joint="steering_joint" kp="60" kv="8" ctrlrange="-0.785 0.785"/>
   </actuator>
 
   <!-- ===== 传感器 ===== -->
