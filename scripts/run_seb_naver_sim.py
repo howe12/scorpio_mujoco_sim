@@ -222,6 +222,22 @@ class KeyboardController:
                 self.steer = min(self.steer + self.steer_step, self.max_steer)
             elif k in ('d', 'D'):
                 self.steer = max(self.steer - self.steer_step, -self.max_steer)
+            elif k in ('q', 'Q'):
+                # 左前斜行: 加速 + 左转
+                self.throttle = min(self.throttle + self.throttle_step, self.max_throttle)
+                self.steer = min(self.steer + self.steer_step, self.max_steer)
+            elif k in ('e', 'E'):
+                # 右前斜行: 加速 + 右转
+                self.throttle = min(self.throttle + self.throttle_step, self.max_throttle)
+                self.steer = max(self.steer - self.steer_step, -self.max_steer)
+            elif k in ('z', 'Z'):
+                # 左后斜行: 倒车 + 左转
+                self.throttle = max(self.throttle - self.throttle_step, -self.max_throttle)
+                self.steer = min(self.steer + self.steer_step, self.max_steer)
+            elif k in ('c', 'C'):
+                # 右后斜行: 倒车 + 右转
+                self.throttle = max(self.throttle - self.throttle_step, -self.max_throttle)
+                self.steer = max(self.steer - self.steer_step, -self.max_steer)
             elif k in ('r', 'R'):
                 self.steer = 0.0
                 self.throttle = 0.0
@@ -277,6 +293,10 @@ def run_interactive(terrain_name):
     print(f"    S / ↓     Reverse / Brake")
     print(f"    A / ←     Steer Left")
     print(f"    D / →     Steer Right")
+    print(f"    Q         Forward + Left  (diagonal)")
+    print(f"    E         Forward + Right (diagonal)")
+    print(f"    Z         Reverse + Left  (diagonal)")
+    print(f"    C         Reverse + Right (diagonal)")
     print(f"    Space     Stop")
     print(f"    R         Center Steering + Stop")
     print(f"    Tab       Toggle Manual ↔ Auto-nav")
@@ -309,7 +329,7 @@ def run_interactive(terrain_name):
                 dist = -1
             mode_tag = "MANUAL" if kb.mode == "manual" else "AUTO"
             # 实际车身速度
-            v_act = float(np.linalg.norm(d.qvel[:2]))
+            v_act = float(np.linalg.norm(data.qvel[:2]))
             v_show = kb.effective_throttle if kb.mode == "manual" else AUTO_LAST_V[0]
             print(f"\r  [{mode_tag}] t={data.time:5.1f}s | "
                   f"v={v_act:4.2f}m/s(令{v_show:+.2f}) str={np.degrees(kb.steer):+5.1f}° | "
