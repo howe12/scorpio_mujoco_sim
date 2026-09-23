@@ -25,4 +25,9 @@ install(DIRECTORY worlds/
   DESTINATION share/${PROJECT_NAME}/worlds
 )
 
+# Install config files (SLAM Toolbox 配置等)
+install(DIRECTORY config/
+  DESTINATION share/${PROJECT_NAME}/config
+)
+
 ament_package()

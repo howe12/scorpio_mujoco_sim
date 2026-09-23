@@ -18,9 +18,10 @@ NXROBO Scorpio 机器人的 MuJoCo 仿真环境，支持**阿克曼转向**驱�
 - [4. 键盘控制](#4-键盘控制)
 - [5. 内置场景](#5-内置场景)
 - [6. 传感器仿真](#6-传感器仿真)
-- [7. 如何设计环境](#7-如何设计环境)
-- [8. 文件结构](#8-文件结构)
-- [9. 常见问题](#9-常见问题)
+- [7. SLAM 建图 (ROS2)](#7-slam-建图-ros2)
+- [8. 如何设计环境](#8-如何设计环境)
+- [9. 文件结构](#9-文件结构)
+- [10. 常见问题](#10-常见问题)
 
 ---
 
@@ -248,7 +249,68 @@ renderer.disable_depth_rendering()
 
 ---
 
-## 7. 如何设计环境
+## 7. SLAM 建图 (ROS2)
+
+### 7.1 快速开始
+
+**终端 1: 启动 MuJoCo 仿真**
+```bash
+cd /develop/scorpio_mujoco_sim
+export XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority
+export DISPLAY=:0
+python3 scripts/run_seb_naver_sim.py --terrain plaza
+```
+
+**终端 2: 启动 SLAM Toolbox**
+```bash
+cd /develop/scorpio_ros2
+source install/setup.bash
+ros2 launch scorpio_mujoco_sim slam_mapping.launch.py terrain:=plaza
+```
+
+**终端 3: 查看地图 (可选)**
+```bash
+ros2 run rviz2 rviz2
+# 添加显示: /map (Map), /scan (LaserScan), /odom (Odometry)
+```
+
+### 7.2 键盘控制建图
+
+在 MuJoCo 窗口中：
+- **W/S**: 前进/后退
+- **A/D**: 左转/右转（松开自动回正）
+- **Q/E/Z/C**: 斜向行驶
+
+控制小车在场景中运动，SLAM Toolbox 会实时构建占用栅格地图。
+
+### 7.3 保存地图
+
+```bash
+ros2 run nav2_map_server map_saver_cli -f /tmp/scorpio_map
+```
+
+### 7.4 其他场景建图
+
+```bash
+# 山地场景
+python3 scripts/run_seb_naver_sim.py --terrain mountain
+ros2 launch scorpio_mujoco_sim slam_mapping.launch.py terrain:=mountain
+
+# 森林场景
+python3 scripts/run_seb_naver_sim.py --terrain forest
+ros2 launch scorpio_mujoco_sim slam_mapping.launch.py terrain:=forest
+```
+
+### 7.5 测试脚本
+
+```bash
+cd /develop/scorpio_mujoco_sim
+./test_slam_mapping.sh plaza
+```
+
+---
+
+## 8. 如何设计环境
 
 ### 7.1 平坦场景 (手写 MJCF)
 复制 `worlds/plaza.xml` 为模板，修改障碍物：
