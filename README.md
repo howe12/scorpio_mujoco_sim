@@ -2,6 +2,8 @@
 
 > **首次使用请先阅读 [DEPLOY.md](DEPLOY.md)** — 完整的环境部署与排查指南。
 >
+> **需要与 scorpio_ros2 工作区协作时看 [WORKFLOW.md](WORKFLOW.md)** — 两份副本的同步与合并流程。
+>
 > 快速安装: `pip install -r requirements.txt`，然后配置 X11 (`export XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority`)
 
 NXROBO Scorpio 机器人的 MuJoCo 仿真环境，支持**阿克曼转向**驱动、**YDLidar G6 激光雷达仿真**、键盘遥控与多场景切换。
