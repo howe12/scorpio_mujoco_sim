@@ -167,45 +167,37 @@ def simple_controller(model, data, goal_pos=None):
 
 
 class KeyboardController:
-    """Keyboard teleop using pynput global listener.
-    
-    ctrl[0], ctrl[1] 单位 = Nm (后轮力矩, torque motor)
+    """Keyboard teleop: hold = active, release = return to neutral (gamepad style).
+
+    ctrl[0], ctrl[1] 单位 = rad/s (后轮角速度, velocity actuator)
     ctrl[2] 单位 = rad (转向角, position actuator)
-    
-    Scorpio: ~5kg, r=0.0525m, vmax=0.26m/s
-    ctrl=0.5 Nm → v≈0.22 m/s (接近 vmax)
-    ctrl=0.8 Nm → v≈0.33 m/s (超速，留余量)
+
+    操控方式:
+      W/S 持续按住 → 持续加速/减速 (松开后速度保持, 按空格停车)
+      A/D 持续按住 → 持续转向 (松开自动回正!)
+      Q/E/Z/C 按住 → 组合动作 (松开转向回正, 速度保持)
     """
 
-    # 轮半径: 车速 v = omega * WHEEL_R,  omega = v / WHEEL_R
     WHEEL_R = 0.0525
-    # 轴距 (前后轮 x 间距), 用于计算转弯半径
     WHEELBASE = 0.315
-    # 最大偏航率 (rad/s): 转弯时限速用, 保证可操控性
-    #  阿克曼转向: yaw_rate = v * tan(steer) / WHEELBASE
-    #  0.9 rad/s (52°/s) 是手动遥操作比较舒适的上限
     MAX_YAW_RATE = 0.9
 
     def __init__(self, model):
         self.model = model
-        self.throttle = 0.0      # m/s (目标车速)
-        self.steer = 0.0         # rad
-        # 最大车速: 0.3 m/s, 与真实 Scorpio 导航配置一致
-        #  实车 scorpio_navigation.yaml: max_velocity = [0.26, 0.0, 1.0]
-        #  1.0 m/s 时偏航率达 182°/s, 无法操控; 0.3 m/s 时仅 55°/s
-        #  如需更快, 改这个值即可 (模型硬上限 1.575 m/s)
-        self.max_throttle = 0.3
-        self.max_steer = DELTA_MAX
-        self.throttle_step = 0.02  # m/s 每按一次 (15次到 0.3 m/s)
-        self.steer_step = 0.06     # rad 每按一次 (~3.4°, 转向更细腻)
-        # 实际生效车速 (经转弯限速后), 供状态栏显示
+        self.throttle = 0.0        # m/s (目标车速)
+        self.steer = 0.0           # rad
+        self.max_throttle = 0.3    # m/s (与实车 0.26 一致)
+        self.max_steer = DELTA_MAX # 0.785 rad = 45°
+        self.throttle_accel = 0.6  # m/s² (按住时加速率)
+        self.steer_rate = 3.0      # rad/s (按住时转向速率)
+        self.steer_return = 3.5    # rad/s (松开时回正速率)
         self.effective_throttle = 0.0
         self.mode = "manual"
         self._quit = False
         self._listener = None
+        self._held = set()         # 当前按住的键
 
     def start_listener(self):
-        """Start global keyboard listener in background thread."""
         from pynput import keyboard as kb_mod
 
         def on_press(key):
@@ -213,59 +205,77 @@ class KeyboardController:
                 k = key.char
             except AttributeError:
                 k = None
+            self._held.add(k if k else key)
 
-            if k in ('w', 'W'):
-                self.throttle = min(self.throttle + self.throttle_step, self.max_throttle)
-            elif k in ('s', 'S'):
-                self.throttle = max(self.throttle - self.throttle_step, -self.max_throttle)
-            elif k in ('a', 'A'):
-                self.steer = min(self.steer + self.steer_step, self.max_steer)
-            elif k in ('d', 'D'):
-                self.steer = max(self.steer - self.steer_step, -self.max_steer)
-            elif k in ('q', 'Q'):
-                # 左前斜行: 加速 + 左转
-                self.throttle = min(self.throttle + self.throttle_step, self.max_throttle)
-                self.steer = min(self.steer + self.steer_step, self.max_steer)
-            elif k in ('e', 'E'):
-                # 右前斜行: 加速 + 右转
-                self.throttle = min(self.throttle + self.throttle_step, self.max_throttle)
-                self.steer = max(self.steer - self.steer_step, -self.max_steer)
-            elif k in ('z', 'Z'):
-                # 左后斜行: 倒车 + 左转
-                self.throttle = max(self.throttle - self.throttle_step, -self.max_throttle)
-                self.steer = min(self.steer + self.steer_step, self.max_steer)
-            elif k in ('c', 'C'):
-                # 右后斜行: 倒车 + 右转
-                self.throttle = max(self.throttle - self.throttle_step, -self.max_throttle)
-                self.steer = max(self.steer - self.steer_step, -self.max_steer)
-            elif k in ('r', 'R'):
+            # 单次触发 (Tab / R / Space / ESC)
+            if k in ('r', 'R'):
                 self.steer = 0.0
                 self.throttle = 0.0
+                self._held.discard(k)
             elif key == kb_mod.Key.space:
                 self.throttle = 0.0
+                self._held.discard(key)
             elif key == kb_mod.Key.tab:
                 self.mode = "auto" if self.mode == "manual" else "manual"
-                mode_str = "AUTO (nav to goal)" if self.mode == "auto" else "MANUAL (keyboard)"
-                print(f"\n  >>> Mode: {mode_str}", flush=True)
+                tag = "AUTO (nav to goal)" if self.mode == "auto" else "MANUAL (keyboard)"
+                print(f"\n  >>> Mode: {tag}", flush=True)
+                self._held.discard(key)
             elif key == kb_mod.Key.esc:
                 self._quit = True
 
-        self._listener = kb_mod.Listener(on_press=on_press)
+        def on_release(key):
+            try:
+                k = key.char
+            except AttributeError:
+                k = None
+            self._held.discard(k if k else key)
+
+        self._listener = kb_mod.Listener(on_press=on_press, on_release=on_release)
         self._listener.daemon = True
         self._listener.start()
 
-    def apply(self, data):
-        """将目标车速 (m/s) 转为轮角速度 (rad/s) 写入执行器.
+    def _update_controls(self, dt):
+        """每帧根据当前按住的键平滑更新 throttle 和 steer."""
+        held = self._held
 
-        根据转向角限制车速, 使偏航率不超过 MAX_YAW_RATE,
-        避免大转角时高速甩尾/失控。
-        """
+        # --- 转向: 按住 A/D/Q/E/Z/C 时持续转向, 松开自动回正 ---
+        steer_cmd = 0.0
+        if any(k in held for k in ('a', 'A', 'q', 'Q', 'z', 'Z')):
+            steer_cmd += 1.0
+        if any(k in held for k in ('d', 'D', 'e', 'E', 'c', 'C')):
+            steer_cmd -= 1.0
+
+        if abs(steer_cmd) > 0:
+            target = steer_cmd * self.max_steer
+            rate = self.steer_rate
+        else:
+            target = 0.0
+            rate = self.steer_return  # 松开时自动回正
+
+        err = target - self.steer
+        step = np.clip(err, -rate * dt, rate * dt)
+        self.steer = np.clip(self.steer + step, -self.max_steer, self.max_steer)
+
+        # --- 油门: 按住 W/S/Q/E/Z/C 时加速/减速, 松开保持 ---
+        accel = 0.0
+        if any(k in held for k in ('w', 'W', 'q', 'Q', 'e', 'E')):
+            accel += self.throttle_accel
+        if any(k in held for k in ('s', 'S', 'z', 'Z', 'c', 'C')):
+            accel -= self.throttle_accel
+        self.throttle = np.clip(self.throttle + accel * dt,
+                                -self.max_throttle, self.max_throttle)
+
+    def apply(self, data, dt=None):
+        """每帧调用: 更新按键状态 → 计算控制 → 写入执行器."""
+        if dt is None:
+            dt = self.model.opt.timestep
+        self._update_controls(dt)
+
         v_cmd = self.throttle
-
-        # 转弯限速: 由目标偏航率反推允许的最大车速
+        # 转弯限速
         if abs(self.steer) > 1e-3:
-            turn_radius = self.WHEELBASE / np.tan(abs(self.steer))
-            v_limit = self.MAX_YAW_RATE * turn_radius
+            R_turn = self.WHEELBASE / np.tan(abs(self.steer))
+            v_limit = self.MAX_YAW_RATE * R_turn
             if abs(v_cmd) > v_limit:
                 v_cmd = np.sign(v_cmd) * v_limit
 
@@ -288,17 +298,17 @@ def run_interactive(terrain_name):
     print(f"\n{'='*60}")
     print(f"  Scorpio Simulation: {terrain_name.upper()}")
     print(f"{'='*60}")
-    print(f"  Keyboard Controls (any window, no focus required):")
-    print(f"    W / ↑     Accelerate")
-    print(f"    S / ↓     Reverse / Brake")
-    print(f"    A / ←     Steer Left")
-    print(f"    D / →     Steer Right")
-    print(f"    Q         Forward + Left  (diagonal)")
-    print(f"    E         Forward + Right (diagonal)")
-    print(f"    Z         Reverse + Left  (diagonal)")
-    print(f"    C         Reverse + Right (diagonal)")
-    print(f"    Space     Stop")
-    print(f"    R         Center Steering + Stop")
+    print(f"  Keyboard Controls (hold = active, release = auto-center):")
+    print(f"    W / ↑     Accelerate  (hold)")
+    print(f"    S / ↓     Reverse     (hold)")
+    print(f"    A / ←     Steer Left  (hold, release auto-centers)")
+    print(f"    D / →     Steer Right (hold, release auto-centers)")
+    print(f"    Q         Forward + Left  (hold)")
+    print(f"    E         Forward + Right (hold)")
+    print(f"    Z         Reverse + Left  (hold)")
+    print(f"    C         Reverse + Right (hold)")
+    print(f"    Space     Brake (speed=0)")
+    print(f"    R         Reset (speed=0, steering=0)")
     print(f"    Tab       Toggle Manual ↔ Auto-nav")
     print(f"    ESC       Quit")
     print(f"  Viewer: Drag=rotate, Scroll=zoom")
