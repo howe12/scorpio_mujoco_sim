@@ -153,7 +153,7 @@ def simple_controller(model, data, goal_pos=None):
     if dist < 3.0:
         speed_factor *= max(0.1, dist / 3.0)
     v_cmd = np.clip(speed_factor * 0.4, 0.0, 0.5)     # m/s (限 0.5, 稳)
-        omega = v_cmd / 0.0525                             # rad/s
+    omega = v_cmd / 0.0525                             # rad/s
     throttle = omega
     
     data.ctrl[0] = throttle
