@@ -30,6 +30,9 @@ A_MAX_LAT = 10.0     # max lateral acceleration (m/s²)
 PHI_MAX = 0.52       # max pitch/roll (rad, ~30°)
 WHEELBASE = 0.5      # m
 
+# 自动导航模式下最近一次的目标车速 (供状态栏显示)
+AUTO_LAST_V = [0.0]
+
 
 def load_world(terrain_name):
     """Load a terrain world file and inject heightfield data if needed."""
@@ -151,7 +154,8 @@ def simple_controller(model, data, goal_pos=None):
     speed_factor = max(0.1, speed_factor * (1.0 - abs(yaw_error) * 0.6 / np.pi))
     if dist < 3.0:
         speed_factor *= max(0.1, dist / 3.0)
-    v_cmd = np.clip(speed_factor * 0.6, 0.0, 1.0)     # m/s
+    v_cmd = np.clip(speed_factor * 0.4, 0.0, 0.5)     # m/s (限 0.5, 稳)
+    AUTO_LAST_V[0] = v_cmd
     omega = v_cmd / 0.0525                             # rad/s
     throttle = omega
     
@@ -175,15 +179,27 @@ class KeyboardController:
 
     # 轮半径: 车速 v = omega * WHEEL_R,  omega = v / WHEEL_R
     WHEEL_R = 0.0525
+    # 轴距 (前后轮 x 间距), 用于计算转弯半径
+    WHEELBASE = 0.315
+    # 最大偏航率 (rad/s): 转弯时限速用, 保证可操控性
+    #  阿克曼转向: yaw_rate = v * tan(steer) / WHEELBASE
+    #  0.9 rad/s (52°/s) 是手动遥操作比较舒适的上限
+    MAX_YAW_RATE = 0.9
 
     def __init__(self, model):
         self.model = model
         self.throttle = 0.0      # m/s (目标车速)
         self.steer = 0.0         # rad
-        self.max_throttle = 1.0   # m/s (模型上限 1.575 m/s)
+        # 最大车速: 0.3 m/s, 与真实 Scorpio 导航配置一致
+        #  实车 scorpio_navigation.yaml: max_velocity = [0.26, 0.0, 1.0]
+        #  1.0 m/s 时偏航率达 182°/s, 无法操控; 0.3 m/s 时仅 55°/s
+        #  如需更快, 改这个值即可 (模型硬上限 1.575 m/s)
+        self.max_throttle = 0.3
         self.max_steer = DELTA_MAX
-        self.throttle_step = 0.1  # m/s 每按一次 (10次到 1.0 m/s)
-        self.steer_step = 0.08    # rad 每按一次 (~4.6°)
+        self.throttle_step = 0.02  # m/s 每按一次 (15次到 0.3 m/s)
+        self.steer_step = 0.06     # rad 每按一次 (~3.4°, 转向更细腻)
+        # 实际生效车速 (经转弯限速后), 供状态栏显示
+        self.effective_throttle = 0.0
         self.mode = "manual"
         self._quit = False
         self._listener = None
@@ -223,8 +239,22 @@ class KeyboardController:
         self._listener.start()
 
     def apply(self, data):
-        """将目标车速 (m/s) 转为轮角速度 (rad/s) 写入执行器"""
-        omega = self.throttle / self.WHEEL_R
+        """将目标车速 (m/s) 转为轮角速度 (rad/s) 写入执行器.
+
+        根据转向角限制车速, 使偏航率不超过 MAX_YAW_RATE,
+        避免大转角时高速甩尾/失控。
+        """
+        v_cmd = self.throttle
+
+        # 转弯限速: 由目标偏航率反推允许的最大车速
+        if abs(self.steer) > 1e-3:
+            turn_radius = self.WHEELBASE / np.tan(abs(self.steer))
+            v_limit = self.MAX_YAW_RATE * turn_radius
+            if abs(v_cmd) > v_limit:
+                v_cmd = np.sign(v_cmd) * v_limit
+
+        self.effective_throttle = v_cmd
+        omega = v_cmd / self.WHEEL_R
         data.ctrl[0] = omega
         data.ctrl[1] = omega
         data.ctrl[2] = self.steer
@@ -278,8 +308,11 @@ def run_interactive(terrain_name):
             else:
                 dist = -1
             mode_tag = "MANUAL" if kb.mode == "manual" else "AUTO"
+            # 实际车身速度
+            v_act = float(np.linalg.norm(d.qvel[:2]))
+            v_show = kb.effective_throttle if kb.mode == "manual" else AUTO_LAST_V[0]
             print(f"\r  [{mode_tag}] t={data.time:5.1f}s | "
-                  f"v_cmd={kb.throttle:+.2f}m/s str={np.degrees(kb.steer):+5.1f}° | "
+                  f"v={v_act:4.2f}m/s(令{v_show:+.2f}) str={np.degrees(kb.steer):+5.1f}° | "
                   f"pos=({pos[0]:.2f},{pos[1]:.2f}) yaw={yaw:+.0f}° | "
                   f"goal={dist:.1f}m   ", end='', flush=True)
 
