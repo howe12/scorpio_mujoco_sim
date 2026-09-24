@@ -291,39 +291,48 @@ class KeyboardController:
         data.ctrl[2] = self.steer
 
 
-def run_interactive(terrain_name, enable_ros2=False, publish_images=False):
+def run_interactive(terrain_name, enable_ros2=False, publish_images=False, headless=False):
     """Run with keyboard control (default) or auto-navigation.
 
     Args:
         terrain_name: 场景名称
         enable_ros2: 是否发布 ROS2 话题 (供 SLAM/导航使用)
         publish_images: 是否同时发布相机图像 (较慢)
+        headless: 无 GUI 模式 (需外部 cmd_vel 驱动)
     """
     model, data = load_world(terrain_name)
     mujoco.mj_forward(model, data)
     reset_robot_facing_goal(model, data)
 
-    kb = KeyboardController(model)
-    kb.start_listener()  # Global keyboard listener (bypasses window manager)
+    kb = None
+    viewer = None
+    if not headless:
+        kb = KeyboardController(model)
+        kb.start_listener()
 
-    print(f"\n{'='*60}")
-    print(f"  Scorpio Simulation: {terrain_name.upper()}")
-    print(f"{'='*60}")
-    print(f"  Keyboard Controls (hold = active, release = auto-center):")
-    print(f"    W / ↑     Accelerate  (hold)")
-    print(f"    S / ↓     Reverse     (hold)")
-    print(f"    A / ←     Steer Left  (hold, release auto-centers)")
-    print(f"    D / →     Steer Right (hold, release auto-centers)")
-    print(f"    Q         Forward + Left  (hold)")
-    print(f"    E         Forward + Right (hold)")
-    print(f"    Z         Reverse + Left  (hold)")
-    print(f"    C         Reverse + Right (hold)")
-    print(f"    Space     Brake (speed=0)")
-    print(f"    R         Reset (speed=0, steering=0)")
-    print(f"    Tab       Toggle Manual ↔ Auto-nav")
-    print(f"    ESC       Quit")
-    print(f"  Viewer: Drag=rotate, Scroll=zoom")
-    print(f"{'='*60}\n")
+        print(f"\n{'='*60}")
+        print(f"  Scorpio Simulation: {terrain_name.upper()}")
+        print(f"{'='*60}")
+        print(f"  Keyboard Controls (hold = active, release = auto-center):")
+        print(f"    W / ↑     Accelerate  (hold)")
+        print(f"    S / ↓     Reverse     (hold)")
+        print(f"    A / ←     Steer Left  (hold, release auto-centers)")
+        print(f"    D / →     Steer Right (hold, release auto-centers)")
+        print(f"    Q         Forward + Left  (hold)")
+        print(f"    E         Forward + Right (hold)")
+        print(f"    Z         Reverse + Left  (hold)")
+        print(f"    C         Reverse + Right (hold)")
+        print(f"    Space     Brake (speed=0)")
+        print(f"    R         Reset (speed=0, steering=0)")
+        print(f"    Tab       Toggle Manual ↔ Auto-nav")
+        print(f"    ESC       Quit")
+        print(f"  Viewer: Drag=rotate, Scroll=zoom")
+        print(f"{'='*60}\n")
+
+        viewer = mujoco.viewer.launch_passive(model, data)
+    else:
+        print(f"\n  [HEADLESS] Scorpio Simulation: {terrain_name.upper()}")
+        print(f"  Waiting for /cmd_vel commands...")
 
     # ROS2 发布器 (可选)
     ros2_pub = None
@@ -337,51 +346,89 @@ def run_interactive(terrain_name, enable_ros2=False, publish_images=False):
         except Exception as exc:
             print(f"\n  ⚠ ROS2 发布器初始化失败: {exc}")
 
-    viewer = mujoco.viewer.launch_passive(model, data)
+    # Headless 模式下订阅 cmd_vel
+    cmd_vel = [0.0, 0.0]  # [linear.x, angular.z]
+    if headless and enable_ros2 and ros2_pub is not None:
+        from geometry_msgs.msg import Twist
+        def cmd_vel_cb(msg):
+            cmd_vel[0] = msg.linear.x
+            cmd_vel[1] = msg.angular.z
+        ros2_pub.node.create_subscription(Twist, '/cmd_vel', cmd_vel_cb, 10)
 
-    while viewer.is_running() and not kb._quit:
-        if kb.mode == "manual":
-            kb.apply(data)
-        else:
-            simple_controller(model, data)
-
-        mujoco.mj_step(model, data)
-        viewer.sync()
-
-        # 发布 ROS2 话题
-        if ros2_pub is not None:
-            ros2_pub.publish()
-
-        # Print status every 0.5s
-        if int(data.time * 2) != int((data.time - model.opt.timestep) * 2):
-            pos = data.qpos[:3]
-            q = data.qpos[3:7]
-            yaw = np.degrees(np.arctan2(
-                2*(q[0]*q[3]+q[1]*q[2]), 1-2*(q[2]**2+q[3]**2)))
-            goal_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, 'goal_site')
-            if goal_id >= 0:
-                g = data.site_xpos[goal_id]
-                dist = np.sqrt((g[0]-pos[0])**2 + (g[1]-pos[1])**2)
+    running = True
+    while running:
+        if headless:
+            # 用 cmd_vel 驱动 (Ackermann 转换)
+            v_cmd = cmd_vel[0]
+            omega_cmd = cmd_vel[1]
+            WHEEL_R = 0.0525
+            WHEELBASE = 0.315
+            if abs(v_cmd) > 0.001:
+                steer_angle = np.arctan(omega_cmd * WHEELBASE / max(abs(v_cmd), 0.01))
+                steer_angle = np.clip(steer_angle, -0.785, 0.785)
             else:
-                dist = -1
-            mode_tag = "MANUAL" if kb.mode == "manual" else "AUTO"
-            # 实际车身速度
-            v_act = float(np.linalg.norm(data.qvel[:2]))
-            v_show = kb.effective_throttle
-            print(f"\r  [{mode_tag}] t={data.time:5.1f}s | "
-                  f"v={v_act:4.2f}m/s(令{v_show:+.2f}) str={np.degrees(kb.steer):+5.1f}° | "
-                  f"pos=({pos[0]:.2f},{pos[1]:.2f}) yaw={yaw:+.0f}° | "
-                  f"goal={dist:.1f}m   ", end='', flush=True)
+                steer_angle = 0.0
+            wheel_speed = v_cmd / WHEEL_R
+            data.ctrl[0] = wheel_speed
+            data.ctrl[1] = wheel_speed
+            data.ctrl[2] = steer_angle
 
-    viewer.close()
+            mujoco.mj_step(model, data)
 
-    # 关闭 ROS2 发布器
+            # 发布 ROS2
+            if ros2_pub is not None:
+                ros2_pub.publish()
+
+            # 每 2 秒打印状态
+            if int(data.time * 0.5) != int((data.time - model.opt.timestep) * 0.5):
+                pos = data.qpos[:3]
+                v_act = float(np.linalg.norm(data.qvel[:2]))
+                print(f"\r  [HEADLESS] t={data.time:6.1f}s v={v_act:.2f}m/s "
+                      f"pos=({pos[0]:.2f},{pos[1]:.2f}) cmd=({cmd_vel[0]:.2f},{cmd_vel[1]:.2f})   ",
+                      end='', flush=True)
+        else:
+            if not viewer.is_running() or (kb and kb._quit):
+                running = False
+                continue
+
+            if kb.mode == "manual":
+                kb.apply(data)
+            else:
+                simple_controller(model, data)
+
+            mujoco.mj_step(model, data)
+            viewer.sync()
+
+            if ros2_pub is not None:
+                ros2_pub.publish()
+
+            if int(data.time * 2) != int((data.time - model.opt.timestep) * 2):
+                pos = data.qpos[:3]
+                q = data.qpos[3:7]
+                yaw = np.degrees(np.arctan2(
+                    2*(q[0]*q[3]+q[1]*q[2]), 1-2*(q[2]**2+q[3]**2)))
+                goal_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, 'goal_site')
+                if goal_id >= 0:
+                    g = data.site_xpos[goal_id]
+                    dist = np.sqrt((g[0]-pos[0])**2 + (g[1]-pos[1])**2)
+                else:
+                    dist = -1
+                mode_tag = "MANUAL" if kb.mode == "manual" else "AUTO"
+                v_act = float(np.linalg.norm(data.qvel[:2]))
+                v_show = kb.effective_throttle
+                print(f"\r  [{mode_tag}] t={data.time:5.1f}s | "
+                      f"v={v_act:4.2f}m/s(令{v_show:+.2f}) str={np.degrees(kb.steer):+5.1f}° | "
+                      f"pos=({pos[0]:.2f},{pos[1]:.2f}) yaw={yaw:+.0f}° | "
+                      f"goal={dist:.1f}m   ", end='', flush=True)
+
+    if viewer is not None:
+        viewer.close()
+
     if ros2_pub is not None:
         ros2_pub.shutdown()
 
-    # 强制退出: pynput 监听器和 GLX 清理都会卡住正常退出
     import os as _os
-    if kb._listener is not None:
+    if kb is not None and kb._listener is not None:
         kb._listener.stop()
     _os._exit(0)
 
@@ -440,13 +487,17 @@ def main():
                         help='Terrain scenario to simulate')
     parser.add_argument('--headless', action='store_true',
                         help='Run headless benchmark on all terrains')
+    parser.add_argument('--headless-ros2', action='store_true',
+                        help='Headless mode with ROS2 (no GUI, subscribe /cmd_vel)')
     parser.add_argument('--ros2', action='store_true',
                         help='Enable ROS2 publishing (/scan, /odom, /tf, /imu)')
     parser.add_argument('--ros2-images', action='store_true',
                         help='Also publish camera images (slow)')
     args = parser.parse_args()
     
-    if args.headless:
+    if args.headless_ros2:
+        run_interactive(args.terrain, enable_ros2=True, headless=True)
+    elif args.headless:
         run_headless_benchmark()
     elif args.terrain == 'all':
         for t in TERRAINS:

@@ -88,10 +88,17 @@ class ScorpioROS2Publisher:
         from geometry_msgs.msg import Twist
         from tf2_ros import TransformBroadcaster
 
+        # RELIABLE QoS (FAST-LIO2 / SLAM Toolbox 要求)
+        reliable_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
         # 发布器
         self.odom_pub = self.node.create_publisher(Odometry, '/odom', 10)
-        self.imu_pub = self.node.create_publisher(Imu, '/imu/data', sensor_qos)
-        self.scan_pub = self.node.create_publisher(LaserScan, '/scan', sensor_qos)
+        self.imu_pub = self.node.create_publisher(Imu, '/imu/data', reliable_qos)
+        self.scan_pub = self.node.create_publisher(LaserScan, '/scan', reliable_qos)
 
         if publish_images:
             self.rgb_pub = self.node.create_publisher(Image, '/camera/rgb/image_raw', sensor_qos)
@@ -123,12 +130,17 @@ class ScorpioROS2Publisher:
         # 所有射线在 0.30m 处命中, SLAM 完全无法建图。
         self._geomgroup = np.array([1, 1, 1, 0, 1, 1], dtype=np.int32)
 
-        # 3D LiDAR 非重复扫描相位 (模拟 Livox Lissajous 模式)
-        self._lidar3d_phase = 0.0
+        # 3D 点云 numpy dtype (匹配 velodyne_ros::Point + PCL 对齐)
+        # x,y,z,intensity,time = float32, ring = uint16, pad = uint16
+        self._cloud_dtype = np.dtype([
+            ('x', '<f4'), ('y', '<f4'), ('z', '<f4'),
+            ('intensity', '<f4'), ('time', '<f4'),
+            ('ring', '<u2'), ('_pad', '<u2'),
+        ])
 
-        # PointCloud2 发布器
+        # PointCloud2 发布器 (RELIABLE, FAST-LIO2 要求)
         from sensor_msgs.msg import PointCloud2
-        self.cloud_pub = self.node.create_publisher(PointCloud2, '/livox/lidar', sensor_qos)
+        self.cloud_pub = self.node.create_publisher(PointCloud2, '/livox/lidar', reliable_qos)
         self._last_cloud_time = -999.0
 
         if verbose:
@@ -190,38 +202,36 @@ class ScorpioROS2Publisher:
 
     # ---- 3D LiDAR ----
     def _render_3d_lidar(self):
-        """用射线投射生成 3D 点云 (模拟 Livox Mid-360).
+        """用射线投射生成 3D 点云 (模拟 Velodyne VLP-16 格式).
 
-        非重复扫描: 每帧的垂直角度有 Lissajous 偏移, 多帧累积覆盖完整 FOV.
-        返回 Nx3 numpy array (xyz in lidar frame) 和强度数组.
+        返回结构化 numpy array, 字段: x,y,z,intensity,time,ring
+        兼容 FAST-LIO2 velodyne_handler (lidar_type=2).
         """
         import mujoco
         if self._lidar_site_id < 0:
-            return np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.float32)
+            return np.zeros(0, dtype=self._cloud_dtype)
 
         site_pos = self.data.site_xpos[self._lidar_site_id].copy()
         site_mat = self.data.site_xmat[self._lidar_site_id].reshape(3, 3)
 
-        h_angles = np.linspace(-np.pi, np.pi, self.LIDAR3D_H_RES, endpoint=False)
+        h_res = self.LIDAR3D_H_RES
+        v_lines = self.LIDAR3D_V_LINES
         v_min = np.radians(self.LIDAR3D_V_FOV_MIN)
         v_max = np.radians(self.LIDAR3D_V_FOV_MAX)
 
-        # 非重复扫描: 用黄金比例偏移模拟 Lissajous 填充
-        golden = 0.618033988749895
-        self._lidar3d_phase = (self._lidar3d_phase + golden * 2 * np.pi) % (2 * np.pi)
+        # 预分配结果数组
+        max_pts = h_res * v_lines
+        result = np.zeros(max_pts, dtype=self._cloud_dtype)
+        count = 0
 
-        points = []
-        intensities = []
+        scan_period = 1.0 / self.LIDAR3D_SCAN_RATE  # 0.1s for 10Hz
 
-        for vi in range(self.LIDAR3D_V_LINES):
-            # 基础垂直角均匀分布
-            base_v = v_min + (v_max - v_min) * vi / max(self.LIDAR3D_V_LINES - 1, 1)
-            # Lissajous 偏移: 不同水平位置有不同的垂直抖动
-            for hi, h_ang in enumerate(h_angles):
-                # 非重复偏移: sin(phase + h_idx * golden_ratio)
-                jitter = 0.02 * np.sin(self._lidar3d_phase + hi * golden)
-                v_ang = base_v + jitter
-                v_ang = np.clip(v_ang, v_min, v_max)
+        for vi in range(v_lines):
+            base_v = v_min + (v_max - v_min) * vi / max(v_lines - 1, 1)
+
+            for hi in range(h_res):
+                h_ang = -np.pi + 2.0 * np.pi * hi / h_res
+                v_ang = base_v
 
                 # 球坐标 → 方向向量 (lidar frame: +X forward, +Y left, +Z up)
                 dx = np.cos(v_ang) * np.cos(h_ang)
@@ -233,29 +243,31 @@ class ScorpioROS2Publisher:
                 dist = mujoco.mj_ray(self.model, self.data, site_pos, direction,
                                      self._geomgroup, 1, self._lidar_body_id, geom_id)
                 if dist >= 0 and self.LIDAR3D_MIN_RANGE <= dist <= self.LIDAR3D_MAX_RANGE:
-                    # 转换到 lidar_link 坐标系
                     local_pt = site_mat.T @ (direction * dist)
-                    points.append(local_pt)
-                    # 简单强度模型: 近距离更强
+                    # time: 相对扫描起始时间的偏移 (秒)
+                    # Velodyne 按水平角顺序扫描, time = hi/h_res * scan_period
+                    t_offset = (hi / h_res) * scan_period
                     intensity = max(0.0, min(255.0, 200.0 * (1.0 - dist / self.LIDAR3D_MAX_RANGE)))
-                    intensities.append(intensity)
 
-        if not points:
-            return np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.float32)
+                    result[count] = (local_pt[0], local_pt[1], local_pt[2],
+                                     intensity, t_offset, vi, 0)
+                    count += 1
 
-        return np.array(points, dtype=np.float32), np.array(intensities, dtype=np.float32)
+        return result[:count]
 
     def _publish_pointcloud(self, stamp):
-        """发布 3D PointCloud2 (/livox/lidar)."""
-        from sensor_msgs.msg import PointCloud2, PointField
-        import struct
+        """发布 3D PointCloud2 (/livox/lidar).
 
-        pts_xyz, intensities = self._render_3d_lidar()
-        n = len(pts_xyz)
+        格式: x,y,z,intensity (float32) + time (float32) + ring (uint16)
+        兼容 FAST-LIO2 velodyne_handler (lidar_type=2).
+        """
+        from sensor_msgs.msg import PointCloud2, PointField
+
+        cloud = self._render_3d_lidar()
+        n = len(cloud)
         if n == 0:
             return
 
-        # PointCloud2 消息
         msg = PointCloud2()
         msg.header.stamp = stamp
         msg.header.frame_id = 'lidar_link'
@@ -264,30 +276,18 @@ class ScorpioROS2Publisher:
         msg.is_bigendian = False
         msg.is_dense = True
 
-        # 字段定义: x,y,z (float32) + intensity (float32) + timestamp (uint64)
-        # FAST-LIO2 需要 x,y,z,intensity,timestamp 或至少 x,y,z,intensity
-        fields = [
+        # 匹配 velodyne_ros::Point: x,y,z,intensity,time,ring
+        msg.fields = [
             PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
             PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+            PointField(name='time', offset=16, datatype=PointField.FLOAT32, count=1),
+            PointField(name='ring', offset=20, datatype=PointField.UINT16, count=1),
         ]
-        point_step = 16  # 4 floats × 4 bytes
-        msg.fields = fields
-        msg.point_step = point_step
-        msg.row_step = point_step * n
-
-        # 打包数据
-        buf = bytearray(n * point_step)
-        ts_ns = int(stamp.sec * 1e9 + stamp.nanosec)
-        for i in range(n):
-            offset = i * point_step
-            struct.pack_into('<fffI', buf, offset,
-                             float(pts_xyz[i, 0]),
-                             float(pts_xyz[i, 1]),
-                             float(pts_xyz[i, 2]),
-                             int(intensities[i]))
-        msg.data = bytes(buf)
+        msg.point_step = 24  # 5×float32 + uint16 + padding = 24 bytes
+        msg.row_step = 24 * n
+        msg.data = cloud.tobytes()
 
         self.cloud_pub.publish(msg)
 

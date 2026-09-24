@@ -1,24 +1,14 @@
 """
 FAST-LIO2 3D 建图启动文件
 
-集成: MuJoCo 仿真 + FAST-LIO2 (Livox Mid-360) + RViz2
+集成: MuJoCo 仿真 + FAST-LIO2 + RViz2
 
 用法:
     ros2 launch scorpio_mujoco_sim fastlio_mapping.launch.py terrain:=plaza
-    ros2 launch scorpio_mujoco_sim fastlio_mapping.launch.py terrain:=mountain sim:=false  # 仅 SLAM
-
-前置条件:
-    1. FAST-LIO2 已编译安装到 ROS2 workspace:
-       cd ~/fastlio_ws/src
-       git clone https://github.com/hku-mars/FAST_LIO.git -b ros2
-       git clone https://github.com/Livox-SDK/livox_ros_driver2.git
-       cd .. && colcon build --symlink-install
-    2. source ~/fastlio_ws/install/setup.bash
 """
 
-import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -33,14 +23,11 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration('rviz')
 
     return LaunchDescription([
-        DeclareLaunchArgument('terrain', default_value='plaza',
-                              description='地形场景'),
-        DeclareLaunchArgument('sim', default_value='true',
-                              description='是否启动 MuJoCo 仿真'),
-        DeclareLaunchArgument('rviz', default_value='true',
-                              description='是否启动 RViz2'),
+        DeclareLaunchArgument('terrain', default_value='plaza'),
+        DeclareLaunchArgument('sim', default_value='true'),
+        DeclareLaunchArgument('rviz', default_value='true'),
 
-        # --- MuJoCo 仿真 (带 ROS2 + 3D 点云) ---
+        # --- MuJoCo 仿真 (GUI + ROS2) ---
         ExecuteProcess(
             cmd=[
                 '/usr/bin/python3',
@@ -53,20 +40,47 @@ def generate_launch_description():
             condition=IfCondition(use_sim),
         ),
 
-        # --- FAST-LIO2 ---
+        # --- FAST-LIO2 (内联参数, 避免 yaml 加载问题) ---
         Node(
             package='fast_lio',
             executable='fastlio_mapping',
-            name='fastlio_mapping',
-            parameters=[
-                PathJoinSubstitution([pkg_share, 'config', 'fastlio_mid360.yaml']),
-            ],
+            name='laser_mapping',
+            parameters=[{
+                'common.lid_topic': '/livox/lidar',
+                'common.imu_topic': '/imu/data',
+                'common.time_sync_en': False,
+                'common.time_offset_lidar_to_imu': 0.0,
+                'preprocess.lidar_type': 2,         # Velodyne (x,y,z,intensity,time,ring)
+                'preprocess.scan_line': 32,
+                'preprocess.timestamp_unit': 0,      # seconds
+                'preprocess.blind': 0.5,
+                'mapping.acc_cov': 0.1,
+                'mapping.gyr_cov': 0.1,
+                'mapping.b_acc_cov': 0.0001,
+                'mapping.b_gyr_cov': 0.0001,
+                'mapping.fov_degree': 360.0,
+                'mapping.det_range': 40.0,
+                'mapping.extrinsic_est_en': True,
+                'mapping.extrinsic_T': [0.0, 0.0, 0.0],
+                'mapping.extrinsic_R': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                'publish.path_en': True,
+                'publish.map_en': True,
+                'publish.scan_publish_en': True,
+                'publish.dense_publish_en': True,
+                'publish.scan_bodyframe_pub_en': False,
+                'point_filter_num': 2,
+                'filter_size_surf': 0.5,
+                'filter_size_map': 0.5,
+                'cube_side_length': 200.0,
+                'max_iteration': 4,
+                'feature_extract_enable': False,
+                'pcd_save.pcd_save_en': True,
+                'pcd_save.interval': -1,
+            }],
             output='screen',
-            remappings=[],
         ),
 
         # --- 静态 TF: base_link → IMU_link ---
-        # FAST-LIO2 需要 IMU_link frame; 我们的 IMU 在 base_link 上
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
