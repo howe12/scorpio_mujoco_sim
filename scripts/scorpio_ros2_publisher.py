@@ -104,6 +104,14 @@ class ScorpioROS2Publisher:
         # (扫描中心在雷达外壳内部, 这是真实雷达的物理结构)
         self._lidar_body_id = self._find_body('lidar_link')
 
+        # geomgroup 过滤: 排除纯视觉标记 (group 3)
+        #   group 0 = 环境(地面/墙体/障碍物)
+        #   group 1 = 机器人本体
+        #   group 3 = 起点/终点标记圆柱 (不可参与雷达扫描)
+        # 起点标记是半径 0.3m 的圆柱且套在机器人身上, 不过滤会导致
+        # 所有射线在 0.30m 处命中, SLAM 完全无法建图。
+        self._geomgroup = np.array([1, 1, 1, 0, 1, 1], dtype=np.int32)
+
         if verbose:
             topics = "/odom, /imu/data, /scan"
             if publish_images:
@@ -154,7 +162,7 @@ class ScorpioROS2Publisher:
             direction = site_mat @ np.array([np.cos(ang), np.sin(ang), 0.0])
             geom_id = np.array([-1], dtype=np.int32)
             dist = mujoco.mj_ray(self.model, self.data, site_pos, direction,
-                                 None, 1, self._lidar_body_id, geom_id)
+                                 self._geomgroup, 1, self._lidar_body_id, geom_id)
             if dist >= 0:
                 ranges[i] = np.clip(dist, self.LIDAR_MIN_RANGE, self.LIDAR_MAX_RANGE)
 
