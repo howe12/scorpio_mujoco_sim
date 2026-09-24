@@ -195,7 +195,15 @@ class KeyboardController:
         self._held = set()         # 当前按住的键
 
     def start_listener(self):
-        from pynput import keyboard as kb_mod
+        """启动全局键盘监听 (pynput). 若不可用则降级为无键盘模式."""
+        try:
+            from pynput import keyboard as kb_mod
+        except ImportError:
+            print("\n  ⚠ 未安装 pynput, 键盘控制不可用")
+            print("    安装: /usr/bin/python3 -m pip install --user pynput")
+            print("    或使用 Tab 切换到自动导航模式\n")
+            self._listener = None
+            return
 
         def on_press(key):
             try:
@@ -283,8 +291,14 @@ class KeyboardController:
         data.ctrl[2] = self.steer
 
 
-def run_interactive(terrain_name):
-    """Run with keyboard control (default) or auto-navigation."""
+def run_interactive(terrain_name, enable_ros2=False, publish_images=False):
+    """Run with keyboard control (default) or auto-navigation.
+
+    Args:
+        terrain_name: 场景名称
+        enable_ros2: 是否发布 ROS2 话题 (供 SLAM/导航使用)
+        publish_images: 是否同时发布相机图像 (较慢)
+    """
     model, data = load_world(terrain_name)
     mujoco.mj_forward(model, data)
     reset_robot_facing_goal(model, data)
@@ -311,6 +325,18 @@ def run_interactive(terrain_name):
     print(f"  Viewer: Drag=rotate, Scroll=zoom")
     print(f"{'='*60}\n")
 
+    # ROS2 发布器 (可选)
+    ros2_pub = None
+    if enable_ros2:
+        try:
+            from scorpio_ros2_publisher import ScorpioROS2Publisher
+            ros2_pub = ScorpioROS2Publisher(model, data, publish_images=publish_images)
+        except ImportError as exc:
+            print(f"\n  ⚠ 无法启动 ROS2 发布器: {exc}")
+            print(f"    请先 source ROS2 环境: source /opt/ros/humble/setup.bash")
+        except Exception as exc:
+            print(f"\n  ⚠ ROS2 发布器初始化失败: {exc}")
+
     viewer = mujoco.viewer.launch_passive(model, data)
 
     while viewer.is_running() and not kb._quit:
@@ -321,6 +347,10 @@ def run_interactive(terrain_name):
 
         mujoco.mj_step(model, data)
         viewer.sync()
+
+        # 发布 ROS2 话题
+        if ros2_pub is not None:
+            ros2_pub.publish()
 
         # Print status every 0.5s
         if int(data.time * 2) != int((data.time - model.opt.timestep) * 2):
@@ -344,6 +374,10 @@ def run_interactive(terrain_name):
                   f"goal={dist:.1f}m   ", end='', flush=True)
 
     viewer.close()
+
+    # 关闭 ROS2 发布器
+    if ros2_pub is not None:
+        ros2_pub.shutdown()
 
     # 强制退出: pynput 监听器和 GLX 清理都会卡住正常退出
     import os as _os
@@ -406,15 +440,19 @@ def main():
                         help='Terrain scenario to simulate')
     parser.add_argument('--headless', action='store_true',
                         help='Run headless benchmark on all terrains')
+    parser.add_argument('--ros2', action='store_true',
+                        help='Enable ROS2 publishing (/scan, /odom, /tf, /imu)')
+    parser.add_argument('--ros2-images', action='store_true',
+                        help='Also publish camera images (slow)')
     args = parser.parse_args()
     
     if args.headless:
         run_headless_benchmark()
     elif args.terrain == 'all':
         for t in TERRAINS:
-            run_interactive(t)
+            run_interactive(t, args.ros2, args.ros2_images)
     else:
-        run_interactive(args.terrain)
+        run_interactive(args.terrain, args.ros2, args.ros2_images)
 
 
 if __name__ == '__main__':

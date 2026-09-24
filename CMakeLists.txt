@@ -3,29 +3,41 @@ project(scorpio_mujoco_sim)
 
 find_package(ament_cmake REQUIRED)
 
-# Install Python scripts
+# 安装全部 Python 脚本
 install(PROGRAMS
+  scripts/run_seb_naver_sim.py
+  scripts/scorpio_ros2_publisher.py
   scripts/scorpio_mujoco_bridge.py
+  scripts/lidar_simulator.py
+  scripts/generate_terrain.py
+  scripts/scorpio_rl_env.py
   scripts/test_scoring_mujoco.py
+  scripts/view_sim_web.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install model files
+# 同时把脚本以数据形式放在 share 下, 供 launch 用 python3 直接调用
+install(DIRECTORY scripts/
+  DESTINATION share/${PROJECT_NAME}/scripts
+  FILES_MATCHING PATTERN "*.py"
+)
+
+# 模型文件
 install(DIRECTORY models/
   DESTINATION share/${PROJECT_NAME}/models
 )
 
-# Install launch files
+# launch 文件
 install(DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}/launch
 )
 
-# Install world files
+# 场景文件
 install(DIRECTORY worlds/
   DESTINATION share/${PROJECT_NAME}/worlds
 )
 
-# Install config files (SLAM Toolbox 配置等)
+# 配置文件 (SLAM / RViz)
 install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}/config
 )
