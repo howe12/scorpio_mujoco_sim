@@ -1,42 +1,41 @@
 # FAST-LIO2 配置: Livox Mid-360 (MuJoCo 仿真)
-# 基于 hku-mars/FAST_LIO ROS2 分支的配置格式
+# 参数名必须匹配 FAST-LIO2 的 declare_parameter 调用
 
-common:
-    lid_topic: "/livox/lidar"
-    imu_topic: "/imu/data"
-    time_sync_en: false         # 仿真中时间已同步
-    time_offset_lidar_to_imu: 0.0
+fastlio_mapping:
+  ros__parameters:
+    common:
+      lid_topic: "/livox/lidar"
+      imu_topic: "/imu/data"
+      time_sync_en: false
+      time_offset_lidar_to_imu: 0.0
 
-preprocess:
-    lidar_type: 1               # 1=Livox, 2=Velodyne, 3=Ouster
-    scan_line: 32               # 垂直线束数
-    timestamp_unit: 3           # 0=s, 1=ms, 2=us, 3=ns (Livox 用 ns)
-    blind: 0.5                  # 盲距 (m), 小于此距离的点丢弃
+    preprocess:
+      lidar_type: 0               # 0=default (只需 x,y,z,intensity), 仿真用此模式
+      scan_line: 32
+      timestamp_unit: 0           # 0=s (PointCloud2 无逐点时间戳)
+      blind: 0.5                  # 盲距 (m)
 
-mapping:
-    acc_cov: 0.1                # IMU 加速度计噪声
-    gyr_cov: 0.1                # IMU 陀螺仪噪声
-    b_acc_cov: 0.0001           # 加速度计偏置随机游走
-    b_gyr_cov: 0.0001           # 陀螺仪偏置随机游走
-    fov_degree: 360             # LiDAR FOV
-    det_range: 40.0             # 最大检测距离
-    extrinsic_est_en: true      # 在线估计外参
-    extrinsic_T: [0.0, 0.0, 0.0]       # LiDAR→IMU 平移 (lidar_link 和 IMU 在同一 body)
-    extrinsic_R: [1, 0, 0,
-                   0, 1, 0,
-                   0, 0, 1]            # LiDAR→IMU 旋转 (单位阵, 同 body)
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 40.0
+      extrinsic_est_en: true
+      extrinsic_T: [0.0, 0.0, 0.0]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                     0.0, 1.0, 0.0,
+                     0.0, 0.0, 1.0]
 
-publish:
-    path_publish_en: true
-    scan_publish_en: true
-    scan_effect_pub_en: false
-    tf_publish_en: true
-    map_pub_frame_id: "map"
-    map_child_frame_id: "body"
+    publish:
+      path_publish_en: true
+      scan_publish_en: true
+      scan_effect_pub_en: false
+      tf_publish_en: true
+      map_pub_frame_id: "map"
+      map_child_frame_id: "body"
 
-rviz:
-    enable: false               # 我们用独立的 RViz2
-
-pcd_save:
-    pcd_save_en: true
-    interval: -1                # -1 = 只在退出时保存
+    pcd_save:
+      pcd_save_en: true
+      interval: -1                # -1 = 只在退出时保存

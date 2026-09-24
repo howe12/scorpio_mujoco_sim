@@ -28,9 +28,20 @@ Visualization Manager:
       Queue Size: 5
     - Class: rviz_default_plugins/PointCloud2
       Enabled: true
-      Name: Map Cloud
+      Name: Registered Cloud
       Topic:
         Value: /cloud_registered
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: Intensity
+      Decay Time: 0
+      Queue Size: 1
+    - Class: rviz_default_plugins/PointCloud2
+      Enabled: true
+      Name: Laser Map
+      Topic:
+        Value: /Laser_map
         Reliability Policy: Best Effort
       Style: Points
       Size (Pixels): 1
@@ -49,7 +60,7 @@ Visualization Manager:
       Enabled: true
       Name: Odometry
       Topic:
-        Value: /odom
+        Value: /Odometry
         Reliability Policy: Reliable
       Shape: Arrow
     - Class: rviz_default_plugins/LaserScan
@@ -64,7 +75,7 @@ Visualization Manager:
       Color: 255; 255; 0
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: map
+    Fixed Frame: camera_init
     Frame Rate: 30
   Name: root
   Tools:
@@ -81,7 +92,7 @@ Visualization Manager:
         Y: 0
         Z: 0
       Pitch: 0.6
-      Target Frame: base_link
+      Target Frame: body
       Yaw: 0.8
 Window Geometry:
   Height: 900
