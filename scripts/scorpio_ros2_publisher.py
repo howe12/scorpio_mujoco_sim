@@ -30,11 +30,22 @@ import numpy as np
 class ScorpioROS2Publisher:
     """将 MuJoCo 仿真数据发布到 ROS2 话题."""
 
-    # LiDAR 参数 (YDLidar G6)
+    # 2D LiDAR 参数 (YDLidar G6)
     LIDAR_NUM_POINTS = 720
     LIDAR_MIN_RANGE = 0.12
     LIDAR_MAX_RANGE = 16.0
     LIDAR_SCAN_RATE = 10.0     # Hz
+
+    # 3D LiDAR 参数 (Livox Mid-360 仿真)
+    # Mid-360: 360°×70° FOV, 非重复扫描, ~200k pts/s → 10Hz ≈ 20k pts/frame
+    LIDAR3D_H_FOV = 360.0          # 度
+    LIDAR3D_V_FOV_MIN = -7.0       # 度 (下倾)
+    LIDAR3D_V_FOV_MAX = 63.0       # 度 (上仰)
+    LIDAR3D_H_RES = 360            # 水平线数
+    LIDAR3D_V_LINES = 32           # 垂直线束数
+    LIDAR3D_SCAN_RATE = 10.0       # Hz
+    LIDAR3D_MIN_RANGE = 0.1        # m
+    LIDAR3D_MAX_RANGE = 40.0       # m (Mid-360 标称 70m, 仿真缩短)
 
     # 轮子/底盘参数
     WHEEL_RADIUS = 0.0525
@@ -112,14 +123,23 @@ class ScorpioROS2Publisher:
         # 所有射线在 0.30m 处命中, SLAM 完全无法建图。
         self._geomgroup = np.array([1, 1, 1, 0, 1, 1], dtype=np.int32)
 
+        # 3D LiDAR 非重复扫描相位 (模拟 Livox Lissajous 模式)
+        self._lidar3d_phase = 0.0
+
+        # PointCloud2 发布器
+        from sensor_msgs.msg import PointCloud2
+        self.cloud_pub = self.node.create_publisher(PointCloud2, '/livox/lidar', sensor_qos)
+        self._last_cloud_time = -999.0
+
         if verbose:
-            topics = "/odom, /imu/data, /scan"
+            topics = "/odom, /imu/data, /scan, /livox/lidar"
             if publish_images:
                 topics += ", /camera/*"
             print(f"\n  [ROS2] 发布器已启动")
             print(f"    {topics}")
+            print(f"    3D LiDAR: Livox Mid-360 仿真 ({self.LIDAR3D_H_RES}×{self.LIDAR3D_V_LINES}, {self.LIDAR3D_SCAN_RATE}Hz)")
             if self._lidar_site_id < 0:
-                print(f"    ⚠ 未找到 lidar_site，/scan 将无数据")
+                print(f"    ⚠ 未找到 lidar_site，/scan 和 /livox/lidar 将无数据")
             if self._base_body_id < 0:
                 print(f"    ⚠ 未找到 base_link，/odom 将无数据")
 
@@ -167,6 +187,109 @@ class ScorpioROS2Publisher:
                 ranges[i] = np.clip(dist, self.LIDAR_MIN_RANGE, self.LIDAR_MAX_RANGE)
 
         return ranges
+
+    # ---- 3D LiDAR ----
+    def _render_3d_lidar(self):
+        """用射线投射生成 3D 点云 (模拟 Livox Mid-360).
+
+        非重复扫描: 每帧的垂直角度有 Lissajous 偏移, 多帧累积覆盖完整 FOV.
+        返回 Nx3 numpy array (xyz in lidar frame) 和强度数组.
+        """
+        import mujoco
+        if self._lidar_site_id < 0:
+            return np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.float32)
+
+        site_pos = self.data.site_xpos[self._lidar_site_id].copy()
+        site_mat = self.data.site_xmat[self._lidar_site_id].reshape(3, 3)
+
+        h_angles = np.linspace(-np.pi, np.pi, self.LIDAR3D_H_RES, endpoint=False)
+        v_min = np.radians(self.LIDAR3D_V_FOV_MIN)
+        v_max = np.radians(self.LIDAR3D_V_FOV_MAX)
+
+        # 非重复扫描: 用黄金比例偏移模拟 Lissajous 填充
+        golden = 0.618033988749895
+        self._lidar3d_phase = (self._lidar3d_phase + golden * 2 * np.pi) % (2 * np.pi)
+
+        points = []
+        intensities = []
+
+        for vi in range(self.LIDAR3D_V_LINES):
+            # 基础垂直角均匀分布
+            base_v = v_min + (v_max - v_min) * vi / max(self.LIDAR3D_V_LINES - 1, 1)
+            # Lissajous 偏移: 不同水平位置有不同的垂直抖动
+            for hi, h_ang in enumerate(h_angles):
+                # 非重复偏移: sin(phase + h_idx * golden_ratio)
+                jitter = 0.02 * np.sin(self._lidar3d_phase + hi * golden)
+                v_ang = base_v + jitter
+                v_ang = np.clip(v_ang, v_min, v_max)
+
+                # 球坐标 → 方向向量 (lidar frame: +X forward, +Y left, +Z up)
+                dx = np.cos(v_ang) * np.cos(h_ang)
+                dy = np.cos(v_ang) * np.sin(h_ang)
+                dz = np.sin(v_ang)
+                direction = site_mat @ np.array([dx, dy, dz])
+
+                geom_id = np.array([-1], dtype=np.int32)
+                dist = mujoco.mj_ray(self.model, self.data, site_pos, direction,
+                                     self._geomgroup, 1, self._lidar_body_id, geom_id)
+                if dist >= 0 and self.LIDAR3D_MIN_RANGE <= dist <= self.LIDAR3D_MAX_RANGE:
+                    # 转换到 lidar_link 坐标系
+                    local_pt = site_mat.T @ (direction * dist)
+                    points.append(local_pt)
+                    # 简单强度模型: 近距离更强
+                    intensity = max(0.0, min(255.0, 200.0 * (1.0 - dist / self.LIDAR3D_MAX_RANGE)))
+                    intensities.append(intensity)
+
+        if not points:
+            return np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.float32)
+
+        return np.array(points, dtype=np.float32), np.array(intensities, dtype=np.float32)
+
+    def _publish_pointcloud(self, stamp):
+        """发布 3D PointCloud2 (/livox/lidar)."""
+        from sensor_msgs.msg import PointCloud2, PointField
+        import struct
+
+        pts_xyz, intensities = self._render_3d_lidar()
+        n = len(pts_xyz)
+        if n == 0:
+            return
+
+        # PointCloud2 消息
+        msg = PointCloud2()
+        msg.header.stamp = stamp
+        msg.header.frame_id = 'lidar_link'
+        msg.height = 1
+        msg.width = n
+        msg.is_bigendian = False
+        msg.is_dense = True
+
+        # 字段定义: x,y,z (float32) + intensity (float32) + timestamp (uint64)
+        # FAST-LIO2 需要 x,y,z,intensity,timestamp 或至少 x,y,z,intensity
+        fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+        point_step = 16  # 4 floats × 4 bytes
+        msg.fields = fields
+        msg.point_step = point_step
+        msg.row_step = point_step * n
+
+        # 打包数据
+        buf = bytearray(n * point_step)
+        ts_ns = int(stamp.sec * 1e9 + stamp.nanosec)
+        for i in range(n):
+            offset = i * point_step
+            struct.pack_into('<fffI', buf, offset,
+                             float(pts_xyz[i, 0]),
+                             float(pts_xyz[i, 1]),
+                             float(pts_xyz[i, 2]),
+                             int(intensities[i]))
+        msg.data = bytes(buf)
+
+        self.cloud_pub.publish(msg)
 
     # ---- 发布 ----
     def publish(self):
@@ -272,6 +395,11 @@ class ScorpioROS2Publisher:
             scan.intensities = []
             self.scan_pub.publish(scan)
             self._last_scan_time = t
+
+        # --- /livox/lidar 3D PointCloud2 (限频 10Hz) ---
+        if t - self._last_cloud_time >= 1.0 / self.LIDAR3D_SCAN_RATE:
+            self._publish_pointcloud(stamp)
+            self._last_cloud_time = t
 
         # --- 相机图像 (可选) ---
         if self.publish_images:
