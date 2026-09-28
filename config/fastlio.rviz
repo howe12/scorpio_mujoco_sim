@@ -21,16 +21,6 @@ Visualization Manager:
       Description Topic:
         Value: /robot_description
       Visual Enabled: true
-    - Class: rviz_default_plugins/Map
-      Enabled: true
-      Name: Occupancy Map
-      Topic:
-        Value: /map
-        Reliability Policy: Reliable
-        Durability Policy: Transient Local
-      Color Scheme: map
-      Alpha: 0.7
-      Draw Behind: true
     - Class: rviz_default_plugins/PointCloud2
       Enabled: true
       Name: LiDAR PointCloud
@@ -89,6 +79,22 @@ Visualization Manager:
       Size (Pixels): 3
       Color Transformer: FlatColor
       Color: 255; 255; 0
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: Planner Path
+      Topic:
+        Value: /planner/trajectory
+        Reliability Policy: Reliable
+      Color: 255; 0; 0
+      Line Width: 0.05
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: A* Rough Path
+      Topic:
+        Value: /planner/rough_path
+        Reliability Policy: Reliable
+      Color: 0; 0; 255
+      Line Width: 0.03
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: camera_init
@@ -98,6 +104,9 @@ Visualization Manager:
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/FocusCamera
     - Class: rviz_default_plugins/Measure
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /goal_pose
   Value: true
   Views:
     Current:

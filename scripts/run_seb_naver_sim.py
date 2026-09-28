@@ -183,7 +183,7 @@ class KeyboardController:
         self.model = model
         self.throttle = 0.0        # m/s (目标车速)
         self.steer = 0.0           # rad
-        self.max_throttle = 0.3    # m/s (与实车 0.26 一致)
+        self.max_throttle = 0.5    # m/s
         self.max_steer = DELTA_MAX # 0.785 rad = 45°
         self.throttle_accel = 0.6  # m/s² (按住时加速率)
         self.steer_rate = 3.0      # rad/s (按住时转向速率)

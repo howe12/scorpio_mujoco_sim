@@ -79,7 +79,7 @@
         </body>
 
         <!-- IMU: URDF origin (0.16, 0.04, 0.175) -->
-        <site name="imu_site" pos="0.16 0.04 0.175" euler="0 0 -3.14159"/>
+        <site name="imu_site" pos="0.16 0.04 0.175" />
 
         <!-- 后轮 (驱动): URDF (±) x=-0.1575, y=±0.0928, z=0.0525 -->
         <body name="left_rear_wheel" pos="-0.1575 0.0928 0.0525">

@@ -68,13 +68,16 @@ def generate_launch_description():
                 'preprocess.scan_line': 32,
                 'preprocess.timestamp_unit': 0,
                 'preprocess.blind': 0.5,
-                'mapping.acc_cov': 0.1,
-                'mapping.gyr_cov': 0.1,
-                'mapping.b_acc_cov': 0.0001,
-                'mapping.b_gyr_cov': 0.0001,
+                # IMU 协方差: 仿真 IMU 有数值噪声, 适当提高让算法更信任 LiDAR
+                'mapping.acc_cov': 3.5,
+                'mapping.gyr_cov': 0.7,
+                'mapping.b_acc_cov': 0.001,
+                'mapping.b_gyr_cov': 0.001,
                 'mapping.fov_degree': 360.0,
                 'mapping.det_range': 40.0,
-                'mapping.extrinsic_est_en': True,
+                # 外参在线估计关闭: 仿真中 LiDAR-IMU 外参已知且固定,
+                # 开启会导致 forest 等复杂场景中估计漂移→重影
+                'mapping.extrinsic_est_en': False,
                 'mapping.extrinsic_T': [0.0, 0.0, 0.0],
                 'mapping.extrinsic_R': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                 'publish.path_en': True,
@@ -82,41 +85,33 @@ def generate_launch_description():
                 'publish.scan_publish_en': True,
                 'publish.dense_publish_en': True,
                 'publish.scan_bodyframe_pub_en': False,
-                'point_filter_num': 2,
-                'filter_size_surf': 0.5,
-                'filter_size_map': 0.5,
+                # 轮式里程计加速度修正: 打滑/陡坡时弊大于利, 默认关闭
+                # (纯 LiDAR-IMU; /wheel_odom 仍发布, 仅作观测)
+                'wheel_odom.enable': False,
+                # point_filter_num=1: 保留更多点, 提高匹配精度减少重影
+                'point_filter_num': 1,
+                # filter_size 减小: 更精细的地图, 减少下采样导致的信息丢失
+                'filter_size_surf': 0.3,
+                'filter_size_map': 0.3,
                 'cube_side_length': 200.0,
-                'max_iteration': 4,
+                # max_iteration 增加: 更多 ICP 迭代提高配准精度
+                'max_iteration': 8,
                 'feature_extract_enable': False,
+                # 保存: Ctrl+C 退出时自动保存 PCD 到此路径
+                'map_file_path': '/develop/scorpio_mujoco_sim_ws/map.pcd',
                 'pcd_save.pcd_save_en': True,
                 'pcd_save.interval': -1,
             }],
             output='screen',
         ),
 
-        # --- OctoMap Builder (3D→2D 栅格地图) ---
-        Node(
-            package='scorpio_mujoco_sim',
-            executable='octomap_builder.py',
-            name='octomap_builder',
-            parameters=[{
-                'resolution': 0.1,
-                'min_z': -0.5,
-                'max_z': 3.0,
-                'ground_z_max': 0.3,
-                'obstacle_z_min': 0.3,
-                'publish_rate': 1.0,
-            }],
-            output='screen',
-        ),
-
-        # --- 静态 TF: base_link → IMU_link ---
+        # --- body → base_footprint TF (桥接 URDF 到 FAST-LIO2 body frame) ---
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
-            name='base_to_imu_tf',
-            arguments=['0.16', '0.04', '0.175', '0', '0', '0',
-                       'base_link', 'IMU_link'],
+            name='body_to_base_tf',
+            arguments=['0', '0', '0', '0', '0', '0',
+                       'body', 'base_footprint'],
         ),
 
         # --- RViz2 ---

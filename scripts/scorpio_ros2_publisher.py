@@ -100,6 +100,12 @@ class ScorpioROS2Publisher:
         self.imu_pub = self.node.create_publisher(Imu, '/imu/data', reliable_qos)
         self.scan_pub = self.node.create_publisher(LaserScan, '/scan', reliable_qos)
 
+        # 轮式里程计 (Ackermann: 后轮编码器 + 转向角)
+        from geometry_msgs.msg import TwistStamped
+        self.wheel_odom_pub = self.node.create_publisher(TwistStamped, '/wheel_odom', reliable_qos)
+        self._wheel_odom_rate = 50.0  # Hz
+        self._last_wheel_odom_time = -999.0
+
         if publish_images:
             self.rgb_pub = self.node.create_publisher(Image, '/camera/rgb/image_raw', sensor_qos)
             self.depth_pub = self.node.create_publisher(Image, '/camera/depth/image_raw', sensor_qos)
@@ -224,8 +230,6 @@ class ScorpioROS2Publisher:
         result = np.zeros(max_pts, dtype=self._cloud_dtype)
         count = 0
 
-        scan_period = 1.0 / self.LIDAR3D_SCAN_RATE  # 0.1s for 10Hz
-
         for vi in range(v_lines):
             base_v = v_min + (v_max - v_min) * vi / max(v_lines - 1, 1)
 
@@ -244,13 +248,16 @@ class ScorpioROS2Publisher:
                                      self._geomgroup, 1, self._lidar_body_id, geom_id)
                 if dist >= 0 and self.LIDAR3D_MIN_RANGE <= dist <= self.LIDAR3D_MAX_RANGE:
                     local_pt = site_mat.T @ (direction * dist)
-                    # time: 相对扫描起始时间的偏移 (秒)
-                    # Velodyne 按水平角顺序扫描, time = hi/h_res * scan_period
-                    t_offset = (hi / h_res) * scan_period
+                    # time 固定为 0.001s (所有点相同):
+                    # MuJoCo mj_ray 是瞬时投射, 所有点同一时刻, 不该做运动去畸变.
+                    # 设 time=0 会让 FAST-LIO2 velodyne_handler 走 given_offset_time=false
+                    # 分支, 从 yaw 角度自行计算每点"时间"→ 不同点时间戳不同 → 运动补偿
+                    # 引入错误畸变 → 漂移. 设统一正值则 given_offset_time=true 且所有点
+                    # curvature 相同 → 等效不去畸变 (点本来就是瞬时采样的).
                     intensity = max(0.0, min(255.0, 200.0 * (1.0 - dist / self.LIDAR3D_MAX_RANGE)))
 
                     result[count] = (local_pt[0], local_pt[1], local_pt[2],
-                                     intensity, t_offset, vi, 0)
+                                     intensity, 0.001, vi, 0)
                     count += 1
 
         return result[:count]
@@ -290,6 +297,87 @@ class ScorpioROS2Publisher:
         msg.data = cloud.tobytes()
 
         self.cloud_pub.publish(msg)
+
+    def _compute_slip_confidence(self):
+        """基于 MuJoCo 接触力计算轮式里程计置信度 [0, 1].
+
+        通过每个后轮的切向力/法向力比值 (slip indicator) 判断打滑:
+          - slip < 0.3: 正常抓地, confidence ≈ 1.0
+          - slip > 1.0: 严重打滑, confidence ≈ 0.0
+        同时比较轮式速度与 body 实际速度的差异.
+        """
+        import mujoco
+
+        # 方法 1: 接触力分析
+        wheel_geom_ids = set()
+        for bname in ['left_rear_wheel', 'right_rear_wheel']:
+            bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, bname)
+            for gid in range(self.model.ngeom):
+                if self.model.geom_bodyid[gid] == bid:
+                    wheel_geom_ids.add(gid)
+
+        max_slip = 0.0
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            if c.geom1 in wheel_geom_ids or c.geom2 in wheel_geom_ids:
+                wrench = np.zeros(6)
+                mujoco.mj_contactForce(self.model, self.data, i, wrench)
+                fn = abs(wrench[2])
+                ft = np.sqrt(wrench[0]**2 + wrench[1]**2)
+                if fn > 0.1:
+                    slip = ft / fn
+                    max_slip = max(max_slip, slip)
+
+        # 方法 2: 轮式速度 vs body 实际速度
+        vel_lr = self._read_sensor('vel_left_rear', 1)[0]
+        vel_rr = self._read_sensor('vel_right_rear', 1)[0]
+        v_wheel = (vel_lr + vel_rr) * 0.5 * self.WHEEL_RADIUS
+        v_body = float(np.linalg.norm(self.data.qvel[:2]))
+
+        speed_diff = abs(v_wheel - v_body) / max(abs(v_wheel) + 0.01, 0.01)
+
+        # 综合置信度
+        # 接触力打滑: slip > 0.5 开始降权, slip > 1.5 完全不可信
+        conf_force = max(0.0, 1.0 - max(0, max_slip - 0.5) / 1.0)
+        # 速度差异: diff > 0.3 开始降权, diff > 0.8 完全不可信
+        conf_speed = max(0.0, 1.0 - max(0, speed_diff - 0.3) / 0.5)
+
+        return min(conf_force, conf_speed)
+
+    def _publish_wheel_odom(self, stamp):
+        """发布 Ackermann 轮式里程计 (/wheel_odom) + 打滑置信度.
+
+        TwistStamped.linear.y 复用为置信度字段 [0, 1]:
+          1.0 = 完全可信, 0.0 = 严重打滑不可信
+        FAST-LIO2 端根据此值动态调整融合权重.
+
+        关键改进:
+          - 角速度用 IMU 陀螺仪 (比轮式计算准确得多, 尤其转弯时)
+          - 线速度在转弯时降权 (Ackermann 同速驱动转弯必然侧滑)
+          - 综合打滑置信度考虑接触力 + 速度差异 + 转向角
+        """
+        from geometry_msgs.msg import TwistStamped
+
+        vel_lr = self._read_sensor('vel_left_rear', 1)[0]
+        vel_rr = self._read_sensor('vel_right_rear', 1)[0]
+        delta = self._read_sensor('steering_angle', 1)[0]
+        gyro = self._read_sensor('imu_gyro', 3)
+
+        v = (vel_lr + vel_rr) * 0.5 * self.WHEEL_RADIUS
+        # 角速度直接用 IMU 陀螺仪 z 分量 (body frame, 不受打滑影响)
+        omega = float(gyro[2])
+
+        # 转弯时线速度也不可靠 (侧向打滑), 降低置信度
+        steer_factor = max(0.0, 1.0 - abs(delta) / 0.785)  # 0°→1.0, 45°→0.0
+        confidence = self._compute_slip_confidence() * steer_factor
+
+        msg = TwistStamped()
+        msg.header.stamp = stamp
+        msg.header.frame_id = 'base_link'
+        msg.twist.linear.x = float(v)
+        msg.twist.linear.y = float(confidence)
+        msg.twist.angular.z = float(omega)
+        self.wheel_odom_pub.publish(msg)
 
     # ---- 发布 ----
     def publish(self):
@@ -357,9 +445,13 @@ class ScorpioROS2Publisher:
         self.tf_broadcaster.sendTransform(tf_lidar)
 
         # --- /imu/data ---
+        # IMU frame 用 lidar_link, 因为 FAST-LIO2 extrinsic=[0,0,0]
+        # 认为 IMU 和 LiDAR 重合. MuJoCo accelerometer/gyro 在 base_link
+        # 坐标系中测量 (imu_site euler 已去掉), 与 lidar_link 只差一个
+        # 纯平移 (无旋转), 所以加速度/角速度数值相同.
         imu = Imu()
         imu.header.stamp = stamp
-        imu.header.frame_id = 'IMU_link'
+        imu.header.frame_id = 'lidar_link'
         accel = self._read_sensor('imu_accel', 3)
         gyro = self._read_sensor('imu_gyro', 3)
         imu.linear_acceleration.x = float(accel[0])
@@ -371,7 +463,6 @@ class ScorpioROS2Publisher:
         imu.orientation = Quaternion(
             x=float(quat_wxyz[1]), y=float(quat_wxyz[2]),
             z=float(quat_wxyz[3]), w=float(quat_wxyz[0]))
-        # 协方差 (SLAM Toolbox 需要有效的协方差)
         imu.orientation_covariance[0] = 0.01
         imu.angular_velocity_covariance[0] = 0.01
         imu.linear_acceleration_covariance[0] = 0.01
@@ -400,6 +491,11 @@ class ScorpioROS2Publisher:
         if t - self._last_cloud_time >= 1.0 / self.LIDAR3D_SCAN_RATE:
             self._publish_pointcloud(stamp)
             self._last_cloud_time = t
+
+        # --- /wheel_odom 轮式里程计 (限频 50Hz) ---
+        if t - self._last_wheel_odom_time >= 1.0 / self._wheel_odom_rate:
+            self._publish_wheel_odom(stamp)
+            self._last_wheel_odom_time = t
 
         # --- 相机图像 (可选) ---
         if self.publish_images:
