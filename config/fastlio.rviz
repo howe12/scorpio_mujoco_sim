@@ -15,12 +15,28 @@ Visualization Manager:
       Enabled: true
       Name: TF
       Frame Timeout: 15
+    - Class: rviz_default_plugins/RobotModel
+      Enabled: true
+      Name: RobotModel
+      Description Topic:
+        Value: /robot_description
+      Visual Enabled: true
+    - Class: rviz_default_plugins/Map
+      Enabled: true
+      Name: Occupancy Map
+      Topic:
+        Value: /map
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+      Color Scheme: map
+      Alpha: 0.7
+      Draw Behind: true
     - Class: rviz_default_plugins/PointCloud2
       Enabled: true
       Name: LiDAR PointCloud
       Topic:
         Value: /livox/lidar
-        Reliability Policy: Best Effort
+        Reliability Policy: Reliable
       Style: Points
       Size (Pixels): 2
       Color Transformer: Intensity
@@ -53,7 +69,7 @@ Visualization Manager:
       Name: Trajectory
       Topic:
         Value: /path
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
       Color: 0; 255; 0
       Line Width: 0.03
     - Class: rviz_default_plugins/Odometry
@@ -61,14 +77,14 @@ Visualization Manager:
       Name: Odometry
       Topic:
         Value: /Odometry
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
       Shape: Arrow
     - Class: rviz_default_plugins/LaserScan
       Enabled: true
       Name: 2D Scan
       Topic:
         Value: /scan
-        Reliability Policy: Best Effort
+        Reliability Policy: Reliable
       Style: Points
       Size (Pixels): 3
       Color Transformer: FlatColor

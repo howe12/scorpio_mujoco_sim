@@ -10,8 +10,9 @@ FAST-LIO2 3D 建图启动文件
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -21,6 +22,8 @@ def generate_launch_description():
     terrain = LaunchConfiguration('terrain')
     use_sim = LaunchConfiguration('sim')
     use_rviz = LaunchConfiguration('rviz')
+
+    urdf_path = PathJoinSubstitution([pkg_share, 'models', 'scorpio_rviz.urdf'])
 
     return LaunchDescription([
         DeclareLaunchArgument('terrain', default_value='plaza'),
@@ -40,7 +43,18 @@ def generate_launch_description():
             condition=IfCondition(use_sim),
         ),
 
-        # --- FAST-LIO2 (内联参数, 避免 yaml 加载问题) ---
+        # --- robot_state_publisher (URDF → /robot_description + TF) ---
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            name='robot_state_publisher',
+            parameters=[{
+                'robot_description': ParameterValue(Command(['cat ', urdf_path]), value_type=str),
+            }],
+            output='screen',
+        ),
+
+        # --- FAST-LIO2 ---
         Node(
             package='fast_lio',
             executable='fastlio_mapping',
@@ -50,9 +64,9 @@ def generate_launch_description():
                 'common.imu_topic': '/imu/data',
                 'common.time_sync_en': False,
                 'common.time_offset_lidar_to_imu': 0.0,
-                'preprocess.lidar_type': 2,         # Velodyne (x,y,z,intensity,time,ring)
+                'preprocess.lidar_type': 2,
                 'preprocess.scan_line': 32,
-                'preprocess.timestamp_unit': 0,      # seconds
+                'preprocess.timestamp_unit': 0,
                 'preprocess.blind': 0.5,
                 'mapping.acc_cov': 0.1,
                 'mapping.gyr_cov': 0.1,
@@ -76,6 +90,22 @@ def generate_launch_description():
                 'feature_extract_enable': False,
                 'pcd_save.pcd_save_en': True,
                 'pcd_save.interval': -1,
+            }],
+            output='screen',
+        ),
+
+        # --- OctoMap Builder (3D→2D 栅格地图) ---
+        Node(
+            package='scorpio_mujoco_sim',
+            executable='octomap_builder.py',
+            name='octomap_builder',
+            parameters=[{
+                'resolution': 0.1,
+                'min_z': -0.5,
+                'max_z': 3.0,
+                'ground_z_max': 0.3,
+                'obstacle_z_min': 0.3,
+                'publish_rate': 1.0,
             }],
             output='screen',
         ),

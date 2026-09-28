@@ -13,6 +13,8 @@ install(PROGRAMS
   scripts/scorpio_rl_env.py
   scripts/test_scoring_mujoco.py
   scripts/view_sim_web.py
+  scripts/octomap_builder.py
+  scripts/test_fastlio.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

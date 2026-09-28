@@ -1,0 +1,124 @@
+<?xml version="1.0"?>
+<!-- Scorpio Ackermann RViz visualization URDF -->
+<robot name="scorpio">
+
+  <!-- base_footprint: ground projection -->
+  <link name="base_footprint"/>
+
+  <!-- base_link: robot body center at ground level -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.1463" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.422 0.190 0.2276"/>
+      </geometry>
+      <material name="silver">
+        <color rgba="0.75 0.75 0.75 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="base_footprint_to_base_link" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- IMU_link -->
+  <link name="IMU_link"/>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="IMU_link"/>
+    <origin xyz="0.16 0.04 0.175" rpy="0 0 0"/>
+  </joint>
+
+  <!-- lidar_link -->
+  <link name="lidar_link">
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.03"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1.0"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="lidar_link"/>
+    <origin xyz="0 0 0.28172" rpy="0 0 0"/>
+  </joint>
+
+  <!-- D435 camera -->
+  <link name="d435_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.090 0.025 0.025"/>
+      </geometry>
+      <material name="dark_gray">
+        <color rgba="0.3 0.3 0.3 1.0"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="d435_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="d435_link"/>
+    <origin xyz="0.1706 0.0175 0.242" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Wheels (visual only) -->
+  <link name="left_rear_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0525" length="0.044"/></geometry>
+      <material name="tire"><color rgba="0.2 0.2 0.2 1.0"/></material>
+    </visual>
+  </link>
+  <joint name="left_rear_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="left_rear_wheel"/>
+    <origin xyz="-0.1575 0.0928 0.0525" rpy="0 0 0"/>
+  </joint>
+
+  <link name="right_rear_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0525" length="0.044"/></geometry>
+      <material name="tire"/>
+    </visual>
+  </link>
+  <joint name="right_rear_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="right_rear_wheel"/>
+    <origin xyz="-0.1575 -0.0928 0.0525" rpy="0 0 0"/>
+  </joint>
+
+  <link name="left_front_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0525" length="0.044"/></geometry>
+      <material name="tire"/>
+    </visual>
+  </link>
+  <joint name="left_front_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="left_front_wheel"/>
+    <origin xyz="0.1575 0.0928 0.0525" rpy="0 0 0"/>
+  </joint>
+
+  <link name="right_front_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0525" length="0.044"/></geometry>
+      <material name="tire"/>
+    </visual>
+  </link>
+  <joint name="right_front_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="right_front_wheel"/>
+    <origin xyz="0.1575 -0.0928 0.0525" rpy="0 0 0"/>
+  </joint>
+
+</robot>
