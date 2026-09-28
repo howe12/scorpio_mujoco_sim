@@ -50,7 +50,7 @@ class ScorpioROS2Publisher:
     # 轮子/底盘参数
     WHEEL_RADIUS = 0.0525
 
-    def __init__(self, model, data, publish_images=False, verbose=True):
+    def __init__(self, model, data, publish_images=False, verbose=True, publish_odom_tf=True):
         """初始化 ROS2 发布器.
 
         Args:
@@ -58,6 +58,9 @@ class ScorpioROS2Publisher:
             data: MuJoCo data
             publish_images: 是否发布相机图像 (较慢，默认 False)
             verbose: 是否打印初始化信息
+            publish_odom_tf: 是否发布 odom→base_footprint TF.
+                与 FAST-LIO2 联用时设为 False (FAST-LIO2 的 camera_init→body
+                是世界系, sim 的 odom 系会形成第二个父节点导致 TF 树冲突).
         """
         import rclpy
         from rclpy.node import Node
@@ -65,6 +68,7 @@ class ScorpioROS2Publisher:
 
         self.model = model
         self.data = data
+        self.publish_odom_tf = publish_odom_tf
         self.publish_images = publish_images
         self._rclpy = rclpy
 
@@ -414,35 +418,24 @@ class ScorpioROS2Publisher:
         odom.twist.twist.angular.z = float(angvel[2])
         self.odom_pub.publish(odom)
 
-        # --- /tf: odom -> base_footprint ---
-        tf_odom = TransformStamped()
-        tf_odom.header.stamp = stamp
-        tf_odom.header.frame_id = 'odom'
-        tf_odom.child_frame_id = 'base_footprint'
-        tf_odom.transform.translation.x = float(pos[0])
-        tf_odom.transform.translation.y = float(pos[1])
-        tf_odom.transform.translation.z = float(pos[2])
-        tf_odom.transform.rotation = Quaternion(
-            x=float(quat_wxyz[1]), y=float(quat_wxyz[2]),
-            z=float(quat_wxyz[3]), w=float(quat_wxyz[0]))
-        self.tf_broadcaster.sendTransform(tf_odom)
+        # --- /tf: odom -> base_footprint (可选, 默认发布) ---
+        # 与 FAST-LIO2 联用时关闭 (publish_odom_tf=False), 避免 TF 树冲突
+        if self.publish_odom_tf:
+            tf_odom = TransformStamped()
+            tf_odom.header.stamp = stamp
+            tf_odom.header.frame_id = 'odom'
+            tf_odom.child_frame_id = 'base_footprint'
+            tf_odom.transform.translation.x = float(pos[0])
+            tf_odom.transform.translation.y = float(pos[1])
+            tf_odom.transform.translation.z = float(pos[2])
+            tf_odom.transform.rotation = Quaternion(
+                x=float(quat_wxyz[1]), y=float(quat_wxyz[2]),
+                z=float(quat_wxyz[3]), w=float(quat_wxyz[0]))
+            self.tf_broadcaster.sendTransform(tf_odom)
 
-        # --- /tf: base_footprint -> base_link (重合) ---
-        tf_base = TransformStamped()
-        tf_base.header.stamp = stamp
-        tf_base.header.frame_id = 'base_footprint'
-        tf_base.child_frame_id = 'base_link'
-        tf_base.transform.rotation.w = 1.0
-        self.tf_broadcaster.sendTransform(tf_base)
-
-        # --- /tf: base_link -> lidar_link (静态, z=0.282) ---
-        tf_lidar = TransformStamped()
-        tf_lidar.header.stamp = stamp
-        tf_lidar.header.frame_id = 'base_link'
-        tf_lidar.child_frame_id = 'lidar_link'
-        tf_lidar.transform.translation.z = 0.28172
-        tf_lidar.transform.rotation.w = 1.0
-        self.tf_broadcaster.sendTransform(tf_lidar)
+        # NOTE: base_footprint 以下的 TF (base_link, lidar_link, wheels ...)
+        # 全部由 robot_state_publisher 从 URDF 发布, 这里不再发布.
+        # 避免两个节点发布相同 frame 对导致 TF 冲突 (RViz 抖动/乱).
 
         # --- /imu/data ---
         # IMU frame 用 lidar_link, 因为 FAST-LIO2 extrinsic=[0,0,0]

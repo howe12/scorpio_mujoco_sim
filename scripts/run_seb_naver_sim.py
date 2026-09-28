@@ -291,7 +291,7 @@ class KeyboardController:
         data.ctrl[2] = self.steer
 
 
-def run_interactive(terrain_name, enable_ros2=False, publish_images=False, headless=False):
+def run_interactive(terrain_name, enable_ros2=False, publish_images=False, headless=False, no_tf_odom=False):
     """Run with keyboard control (default) or auto-navigation.
 
     Args:
@@ -339,7 +339,8 @@ def run_interactive(terrain_name, enable_ros2=False, publish_images=False, headl
     if enable_ros2:
         try:
             from scorpio_ros2_publisher import ScorpioROS2Publisher
-            ros2_pub = ScorpioROS2Publisher(model, data, publish_images=publish_images)
+            ros2_pub = ScorpioROS2Publisher(model, data, publish_images=publish_images,
+                                            publish_odom_tf=not no_tf_odom)
         except ImportError as exc:
             print(f"\n  ⚠ 无法启动 ROS2 发布器: {exc}")
             print(f"    请先 source ROS2 环境: source /opt/ros/humble/setup.bash")
@@ -493,10 +494,12 @@ def main():
                         help='Enable ROS2 publishing (/scan, /odom, /tf, /imu)')
     parser.add_argument('--ros2-images', action='store_true',
                         help='Also publish camera images (slow)')
+    parser.add_argument('--no-tf-odom', action='store_true',
+                        help='不发布 odom→base_footprint TF (与 FAST-LIO2 联用时避免 TF 冲突)')
     args = parser.parse_args()
     
     if args.headless_ros2:
-        run_interactive(args.terrain, enable_ros2=True, headless=True)
+        run_interactive(args.terrain, enable_ros2=True, headless=True, no_tf_odom=args.no_tf_odom)
     elif args.headless:
         run_headless_benchmark()
     elif args.terrain == 'all':
