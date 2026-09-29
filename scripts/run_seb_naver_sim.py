@@ -347,9 +347,9 @@ def run_interactive(terrain_name, enable_ros2=False, publish_images=False, headl
         except Exception as exc:
             print(f"\n  ⚠ ROS2 发布器初始化失败: {exc}")
 
-    # Headless 模式下订阅 cmd_vel
+    # 所有 ROS2 模式都订阅 cmd_vel (供 MPC/导航驱动), 无论 GUI 还是 headless
     cmd_vel = [0.0, 0.0]  # [linear.x, angular.z]
-    if headless and enable_ros2 and ros2_pub is not None:
+    if enable_ros2 and ros2_pub is not None:
         from geometry_msgs.msg import Twist
         def cmd_vel_cb(msg):
             cmd_vel[0] = msg.linear.x
@@ -392,7 +392,22 @@ def run_interactive(terrain_name, enable_ros2=False, publish_images=False, headl
                 running = False
                 continue
 
-            if kb.mode == "manual":
+            # MPC/导航指令优先: 有非零 cmd_vel 时用它驱动, 否则用键盘
+            if abs(cmd_vel[0]) > 0.001 or abs(cmd_vel[1]) > 0.001:
+                v_cmd = cmd_vel[0]
+                omega_cmd = cmd_vel[1]
+                WHEEL_R = 0.0525
+                WHEELBASE = 0.315
+                if abs(v_cmd) > 0.001:
+                    steer_angle = np.arctan(omega_cmd * WHEELBASE / max(abs(v_cmd), 0.01))
+                    steer_angle = np.clip(steer_angle, -0.785, 0.785)
+                else:
+                    steer_angle = 0.0
+                wheel_speed = v_cmd / WHEEL_R
+                data.ctrl[0] = wheel_speed
+                data.ctrl[1] = wheel_speed
+                data.ctrl[2] = steer_angle
+            elif kb.mode == "manual":
                 kb.apply(data)
             else:
                 simple_controller(model, data)
