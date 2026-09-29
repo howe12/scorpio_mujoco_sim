@@ -567,9 +567,9 @@ def main():
         run_headless_benchmark()
     elif args.terrain == 'all':
         for t in TERRAINS:
-            run_interactive(t, args.ros2, args.ros2_images)
+            run_interactive(t, args.ros2, args.ros2_images, no_tf_odom=args.no_tf_odom)
     else:
-        run_interactive(args.terrain, args.ros2, args.ros2_images)
+        run_interactive(args.terrain, args.ros2, args.ros2_images, no_tf_odom=args.no_tf_odom)
 
 
 if __name__ == '__main__':
