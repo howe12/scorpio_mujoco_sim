@@ -84,6 +84,41 @@ def reset_robot_facing_goal(model, data):
     mujoco.mj_forward(model, data)
 
 
+def snap_to_ground(model, data):
+    """把机器人垂直投影到地面 (raycast 找地形表面), 避免初始悬空导致:
+    - 自由落体 (IMU 初始化被零加速度污染 → FAST-LIO2 重力估计错误)
+    - 落地冲击 (IMU 噪声巨大)
+    只命中地形/hfield geom (排除 start_marker 等小标记物).
+    """
+    x, y = data.qpos[0], data.qpos[1]
+    # 找出所有地形类 geom (hfield 或名字含 terrain)
+    terrain_gids = []
+    for gi in range(model.ngeom):
+        gname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, gi) or ''
+        if model.geom_type[gi] == mujoco.mjtGeom.mjGEOM_HFIELD or 'terrain' in gname.lower():
+            terrain_gids.append(gi)
+    if not terrain_gids:
+        return  # 平地无 hfield, 无需处理
+
+    best_dist = -1.0
+    best_z = None
+    pnt = np.zeros(3); vec = np.zeros(3)
+    geomgroup = np.ones(6, dtype=np.uint8)
+    gid = np.array([-1], dtype=np.int32)
+    for gi in terrain_gids:
+        # 从 (x,y,100) 向下射向该 geom
+        pnt[:] = [x, y, 100.0]
+        vec[:] = [0.0, 0.0, -1.0]
+        dist = mujoco.mj_ray(model, data, pnt, vec, geomgroup, 0, -1, gid, None)
+        if dist >= 0 and (best_dist < 0 or dist < best_dist):
+            best_dist = dist
+            best_z = 100.0 - dist
+    if best_z is not None:
+        data.qpos[2] = best_z
+        mujoco.mj_forward(model, data)
+        print(f"  [snap_to_ground] 机器人投影到 (x={x:.2f},y={y:.2f}) 表面 z={best_z:.3f}")
+
+
 def simple_controller(model, data, goal_pos=None):
     """Proportional controller with terrain-aware speed adjustment."""
     # Get current pose directly from qpos (freejoint: x,y,z,w,x,y,z)
@@ -303,6 +338,7 @@ def run_interactive(terrain_name, enable_ros2=False, publish_images=False, headl
     model, data = load_world(terrain_name)
     mujoco.mj_forward(model, data)
     reset_robot_facing_goal(model, data)
+    snap_to_ground(model, data)
 
     kb = None
     viewer = None
@@ -333,6 +369,18 @@ def run_interactive(terrain_name, enable_ros2=False, publish_images=False, headl
     else:
         print(f"\n  [HEADLESS] Scorpio Simulation: {terrain_name.upper()}")
         print(f"  Waiting for /cmd_vel commands...")
+
+    # 物理稳定期: 让不平地形上悬空的机器人落到地面并静止.
+    # forest/mountain 等 hfield 场景初始 qpos[2] 可能悬空 (轮底未贴地),
+    # 若直接发布 IMU, FAST-LIO2 会在自由落体 + 落地冲击的瞬态上初始化,
+    # 重力方向估计错误 → 定位发散. 这里先 step 到完全静止再开 ROS2.
+    if model.nhfield > 0:
+        settle_steps = int(2.0 / model.opt.timestep)  # 2 s 物理时间
+        for _ in range(settle_steps):
+            mujoco.mj_step(model, data)
+        mujoco.mj_forward(model, data)
+        print(f"  [settle] 物理稳定 {settle_steps*model.opt.timestep:.1f}s, "
+              f"机器人 z={data.qpos[2]:.3f}, v={np.linalg.norm(data.qvel[:2]):.3f}")
 
     # ROS2 发布器 (可选)
     ros2_pub = None
