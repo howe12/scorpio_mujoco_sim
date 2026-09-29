@@ -326,8 +326,10 @@ class ScorpioROS2Publisher:
             if c.geom1 in wheel_geom_ids or c.geom2 in wheel_geom_ids:
                 wrench = np.zeros(6)
                 mujoco.mj_contactForce(self.model, self.data, i, wrench)
-                fn = abs(wrench[2])
-                ft = np.sqrt(wrench[0]**2 + wrench[1]**2)
+                # MuJoCo: wrench 的力在接触局部 frame 系, frame 的 x 轴 = 接触法线.
+                # 故法向力 = |wrench[0]|, 切向力 = sqrt(wrench[1]² + wrench[2]²)
+                fn = abs(wrench[0])
+                ft = np.sqrt(wrench[1]**2 + wrench[2]**2)
                 if fn > 0.1:
                     slip = ft / fn
                     max_slip = max(max_slip, slip)
