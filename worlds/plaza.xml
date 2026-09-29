@@ -23,7 +23,7 @@
     <global offwidth="1280" offheight="960"/>
   </visual>
 
-  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4">
+  <option timestep="0.001" gravity="0 0 -9.81" integrator="RK4">
     <flag contact="enable"/>
   </option>
 
