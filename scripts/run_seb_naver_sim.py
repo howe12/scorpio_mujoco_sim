@@ -66,21 +66,21 @@ def load_world(terrain_name):
 
 
 def reset_robot_facing_goal(model, data):
-    """Reset robot orientation to face the goal."""
-    goal_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, 'goal_site')
-    goal = data.site_xpos[goal_id]
-    pos = data.qpos[:3]
-    
-    dx = goal[0] - pos[0]
-    dy = goal[1] - pos[1]
-    yaw = np.arctan2(dy, dx)
-    
-    # Set quaternion for this yaw (w, x, y, z)
-    data.qpos[3] = np.cos(yaw / 2)  # w
-    data.qpos[4] = 0                  # x
-    data.qpos[5] = 0                  # y
-    data.qpos[6] = np.sin(yaw / 2)  # z
-    
+    """重置机器人初始朝向为 0° (MuJoCo +x 轴).
+
+    重要: 保持 0° 朝向, 不转向 goal_site.
+    因为 FAST-LIO2 初始化时把第一帧 LiDAR/IMU 对齐 → camera_init 的 x 轴
+    会指向机器人初始朝向. 若初始朝向是 34° (指向 goal_site), FAST-LIO2 的
+    camera_init 坐标系相对 MuJoCo 世界系偏转 34°,
+    → RViz (Fixed Frame=camera_init) 里点击"前方"实际在侧方 → 导航方向错.
+    设为 0° 则 camera_init x 轴 = MuJoCo x 轴, 坐标系完全对齐.
+    """
+    # Set quaternion for yaw=0 (w=1, x=y=z=0)
+    data.qpos[3] = 1.0  # w
+    data.qpos[4] = 0.0  # x
+    data.qpos[5] = 0.0  # y
+    data.qpos[6] = 0.0  # z
+
     mujoco.mj_forward(model, data)
 
 
