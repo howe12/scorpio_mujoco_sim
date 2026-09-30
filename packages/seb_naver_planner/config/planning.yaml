@@ -1,0 +1,45 @@
+# SEB-Naver Planner + MPC parameters (ported from planning.yaml)
+
+seb_naver_planner:
+  ros__parameters:
+    # Robot
+    wheel_base: 0.315
+    max_speed: 0.5
+    max_steer: 0.785
+
+    # Kinodynamic A*
+    # steer_res 0.5→0.3 rad (28°→17°), 转弯路径更平滑
+    # step_arc 1.5→1.0m, 路径节点更密, 转弯弧线更细腻
+    step_arc: 1.0
+    steer_res: 0.3
+    check_num: 3
+    forward_penalty: 1.0
+    back_penalty: 1.5
+    gear_switch_penalty: 2.0
+    steer_penalty: 0.5
+    steer_change_penalty: 0.3
+    lambda_heu: 1.0
+    max_search_time: 5.0
+    map_resolution: 0.1
+
+    # Goal tolerance (航向容差放宽: 避免到达附近反复调整)
+    goal_tolerance_dist: 0.8
+    goal_tolerance_yaw: 0.3
+    goal_tolerance_vel: 0.05
+    # 重规划间隔: 0.5→1.0s (减少路径频繁变化, 转弯更稳定)
+    replan_interval: 1.0
+
+mpc_controller:
+  ros__parameters:
+    wheel_base: 0.315
+    max_speed: 0.5
+    min_speed: -0.5
+    max_steer: 0.785
+    N_horizon: 20
+    dt: 0.05
+    # 位置权重 (x,y) 高, 航向权重 Q[2] 需足够大才能平滑转弯.
+    # Q[2]=0.5 太低 → MPC 几乎忽略航向误差 → 大半径弧线/过冲 → 转弯差
+    Q: [10.0, 10.0, 2.0]
+    R: [10.0, 10.0]
+    # 转向变化率惩罚压低, 转弯更灵活 (原 10 过硬, 转弯僵直)
+    Rd: [5.0, 3.0]

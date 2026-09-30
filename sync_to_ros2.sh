@@ -53,7 +53,7 @@ echo "源目录:   $SRC"
 echo "目标目录: $DEST"
 echo
 
-# ---- 同步 ----
+# ---- 同步主包 ----
 # --delete: 让目标与源完全一致 (删除源中已移除的文件)
 rsync -a --delete $DRY_RUN \
     --exclude='.git/' \
@@ -63,7 +63,25 @@ rsync -a --delete $DRY_RUN \
     --exclude='mujoco_log*.txt' \
     --exclude='venv/' \
     --exclude='.venv/' \
+    --exclude='packages/' \
     "$SRC/" "$DEST/"
+
+# ---- 同步 packages/ 下的 ROS2 子包到 workspace src/ ----
+# 每个子包是独立的 colcon 包, 需要同步到 workspace src/ 下才能被 colcon 发现
+PACKAGES_DIR="$SRC/packages"
+if [[ -d "$PACKAGES_DIR" ]]; then
+    echo
+    echo "=== 同步 packages/ 子包 ==="
+    for pkg_dir in "$PACKAGES_DIR"/*/; do
+        pkg_name=$(basename "$pkg_dir")
+        pkg_dest="$ROS2_WS/src/$pkg_name"
+        rsync -a --delete $DRY_RUN \
+            --exclude='__pycache__/' \
+            --exclude='*.pyc' \
+            "$pkg_dir" "$pkg_dest/"
+        echo "  OK  $pkg_name → $pkg_dest"
+    done
+fi
 
 if [[ -n "$DRY_RUN" ]]; then
     echo

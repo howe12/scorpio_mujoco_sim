@@ -1,0 +1,41 @@
+# SEB-Naver Terrain Analyzer parameters (ported from elevation_map_gpu.yaml)
+
+terrain_analyzer:
+  ros__parameters:
+    # Map geometry (20m 覆盖更广, 减少 SetGoal 点击越界; 论文支持 8-18m)
+    length_pos_x: 20.0
+    length_pos_y: 20.0
+    resolution_pos: 0.1
+    resolution_yaw: 0.2
+
+    # Kalman filter
+    min_var: 0.0001
+    max_var: 0.05
+    min_var_hori: 0.0001
+    max_var_hori: 0.05
+    mahalanobis_threshold: 2.5
+
+    # Robot footprint ellipse
+    ellipsoid_x: 0.4
+    ellipsoid_y: 0.3
+    ellipsoid_offset_x: 0.13
+    ellipsoid_offset_y: 0.0
+
+    # Traversability limits
+    max_phx: 0.786          # ~π/4, max pitch
+    max_phy: 1.571          # ~π/2, max roll
+    max_curvature: 1000.0
+    weight_phi: 0.2
+    weight_curvature: 0.6
+
+    # Height filter (body frame)
+    ignore_z_min: -3.0
+    ignore_z_max: 2.0
+
+    # Sensor model
+    beam_sigma: 0.008
+
+    # Topics
+    cloud_topic: "/cloud_registered"
+    odom_topic: "/Odometry"
+    update_rate: 5.0

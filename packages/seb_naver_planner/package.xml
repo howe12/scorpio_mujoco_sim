@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>seb_naver_planner</name>
+  <version>0.1.0</version>
+  <description>SEB-Naver Kinodynamic A* + PHR-ALM + MPC (ROS2 Python)</description>
+  <maintainer email="dev@seb-naver.org">seb_naver</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>se2_grid_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

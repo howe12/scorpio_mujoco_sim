@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>se2_grid_core</name>
+  <version>0.1.0</version>
+  <description>SE(2) Grid Map core library (ported from ZJU-FAST-Lab/seb_naver)</description>
+  <maintainer email="dev@seb-naver.org">seb_naver</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>eigen</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
