@@ -63,25 +63,25 @@ rsync -a --delete $DRY_RUN \
     --exclude='mujoco_log*.txt' \
     --exclude='venv/' \
     --exclude='.venv/' \
-    --exclude='packages/' \
     "$SRC/" "$DEST/"
 
-# ---- 同步 packages/ 下的 ROS2 子包到 workspace src/ ----
-# 每个子包是独立的 colcon 包, 需要同步到 workspace src/ 下才能被 colcon 发现
-PACKAGES_DIR="$SRC/packages"
-if [[ -d "$PACKAGES_DIR" ]]; then
-    echo
-    echo "=== 同步 packages/ 子包 ==="
-    for pkg_dir in "$PACKAGES_DIR"/*/; do
-        pkg_name=$(basename "$pkg_dir")
-        pkg_dest="$ROS2_WS/src/$pkg_name"
+# ---- 同步 ROS2 子包到 workspace src/ ----
+# colcon 只扫描 src/ 直接子目录, 不递归. 这 4 个子包在仓库根目录下,
+# 需要 rsync 到 workspace src/ 才能被 colcon 发现并编译.
+ROS2_PKGS="se2_grid_msgs se2_grid_core terrain_analyzer seb_naver_planner"
+echo
+echo "=== 同步 ROS2 子包 ==="
+for pkg_name in $ROS2_PKGS; do
+    pkg_src="$SRC/$pkg_name"
+    pkg_dest="$ROS2_WS/src/$pkg_name"
+    if [[ -d "$pkg_src" ]]; then
         rsync -a --delete $DRY_RUN \
             --exclude='__pycache__/' \
             --exclude='*.pyc' \
-            "$pkg_dir" "$pkg_dest/"
+            "$pkg_src/" "$pkg_dest/"
         echo "  OK  $pkg_name → $pkg_dest"
-    done
-fi
+    fi
+done
 
 if [[ -n "$DRY_RUN" ]]; then
     echo

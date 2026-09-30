@@ -27,7 +27,7 @@
 **单一 Git 仓库**: https://github.com/howe12/scorpio_mujoco_sim
 
 ```
-scorpio_mujoco_sim/                      # Git 仓库根目录
+scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspace src/scorpio_mujoco_sim)
 ├── scripts/                             # Python 仿真脚本
 │   ├── run_seb_naver_sim.py             #   主入口: MuJoCo 仿真循环
 │   ├── scorpio_ros2_publisher.py        #   ROS2 话题发布器
@@ -45,12 +45,11 @@ scorpio_mujoco_sim/                      # Git 仓库根目录
 │   └── snowy_mountain.xml               #   雪山
 ├── config/
 │   └── fastlio.rviz                     # RViz 配置
-├── packages/                            # ROS2 子包 (colcon 包, 通过 sync 脚本链接到 workspace)
-│   ├── se2_grid_msgs/                   #   SE(2) 栅格消息定义 (CMake)
-│   ├── se2_grid_core/                   #   SE2Grid C++ 核心库 (header-only)
-│   ├── terrain_analyzer/                #   高程图 + 障碍物检测 (C++)
-│   └── seb_naver_planner/               #   A* + MPC + FSM (Python)
-├── sync_to_ros2.sh                      # 同步脚本 (本仓库 → colcon workspace src/)
+├── se2_grid_msgs/                       # ROS2 子包: SE(2) 栅格消息定义 (CMake)
+├── se2_grid_core/                       # ROS2 子包: SE2Grid C++ 核心库 (header-only)
+├── terrain_analyzer/                    # ROS2 子包: 高程图 + 障碍物检测 (C++)
+├── seb_naver_planner/                   # ROS2 子包: A* + MPC + FSM (Python)
+├── sync_to_ros2.sh                      # 同步脚本 (本仓库 → 上游 workspace)
 ├── HANDOVER.md                          # 本文档
 └── README.md
 ```
@@ -60,11 +59,11 @@ scorpio_mujoco_sim/                      # Git 仓库根目录
 ```
 /develop/scorpio_mujoco_sim_ws/
 ├── src/
-│   ├── scorpio_mujoco_sim/              # → Git 仓库 (symlink 或 clone)
-│   ├── se2_grid_msgs/                   # → 从 packages/ 同步
-│   ├── se2_grid_core/                   # → 从 packages/ 同步
-│   ├── terrain_analyzer/                # → 从 packages/ 同步
-│   ├── seb_naver_planner/               # → 从 packages/ 同步
+│   ├── scorpio_mujoco_sim/              # Git 仓库 (clone 在此)
+│   ├── se2_grid_msgs/                   # rsync 副本 (由 sync_to_ros2.sh 生成)
+│   ├── se2_grid_core/                   # rsync 副本
+│   ├── terrain_analyzer/                # rsync 副本
+│   ├── seb_naver_planner/               # rsync 副本
 │   ├── FAST_LIO/                        # 本地 fork (无远程)
 │   └── livox_ros_driver2/               # Livox 消息定义
 ├── install/                             # colcon build 输出
@@ -72,13 +71,9 @@ scorpio_mujoco_sim/                      # Git 仓库根目录
 └── clean_ros.sh                         # 残留进程清理
 ```
 
-> **同步方式**: `sync_to_ros2.sh` 会把 `packages/` 下的 4 个子包 rsync 到 `$ROS2_WS/src/` 下，使 colcon 能发现并编译它们。也可以手动 symlink：
-> ```bash
-> cd /develop/scorpio_mujoco_sim_ws/src
-> for pkg in se2_grid_msgs se2_grid_core terrain_analyzer seb_naver_planner; do
->     ln -sf ../scorpio_mujoco_sim/packages/$pkg $pkg
-> done
-> ```
+> **为什么需要 rsync 副本？** colcon 只扫描 `src/` 的**直接子目录**，不会递归进入 `scorpio_mujoco_sim/seb_naver_planner/`。所以 4 个 ROS2 子包必须在 `src/` 下有独立目录才能被 colcon 发现。`sync_to_ros2.sh` 会自动完成这个复制。
+>
+> **开发流程**：在 `src/scorpio_mujoco_sim/` 里改代码 → 运行 `bash sync_to_ros2.sh` → `colcon build`。
 
 ---
 
