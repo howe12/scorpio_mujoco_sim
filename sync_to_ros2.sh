@@ -8,18 +8,32 @@
 #   用本脚本把改动同步过去。
 #
 # 用法:
-#   ./sync_to_ros2.sh                 # 同步到默认路径
+#   ./sync_to_ros2.sh                 # 同步到默认路径 (/develop/scorpio_ros2)
+#   ./sync_to_ros2.sh --here          # 同步到本仓库所在工作区 (同级 src/ 下)
 #   ./sync_to_ros2.sh --dry-run       # 预览将要同步的内容，不实际写入
 #   SCORPIO_ROS2_WS=~/scorpio_ros2 ./sync_to_ros2.sh   # 指定工作区路径
 #
 # 默认工作区: /develop/scorpio_ros2
 # 目标目录:   <工作区>/src/scorpio/scorpio_mujoco_sim
 #
+# --here 模式: 目标为 <本仓库父目录>/，即把仓库自身当作工作区 src/ 下的包
+#   (用于 /develop/scorpio_mujoco_sim_ws 这类仓库位于 src/ 下的布局)
+#
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROS2_WS="${SCORPIO_ROS2_WS:-/develop/scorpio_ros2}"
-DEST="$ROS2_WS/src/scorpio/scorpio_mujoco_sim"
+
+# --here: 工作区 = 本仓库的父目录 (src/)，4 个子包直接落在 src/ 下
+if [[ "${1:-}" == "--here" ]]; then
+    ROS2_WS="$(cd "$(dirname "$SRC")/.." && pwd)"
+    DEST="$SRC"                       # 本包已在 src/ 下，无需再复制
+    HERE_MODE=1
+    shift
+else
+    ROS2_WS="${SCORPIO_ROS2_WS:-/develop/scorpio_ros2}"
+    DEST="$ROS2_WS/src/scorpio/scorpio_mujoco_sim"
+    HERE_MODE=0
+fi
 
 DRY_RUN=""
 if [[ "${1:-}" == "--dry-run" ]]; then
@@ -41,19 +55,29 @@ if ! command -v rsync >/dev/null 2>&1; then
 fi
 
 # 安全检查: 确认目标在预期位置，避免误删其它目录
-case "$DEST" in
-    */src/scorpio/scorpio_mujoco_sim) ;;
-    *)
-        echo "错误: 目标路径异常，拒绝执行: $DEST" >&2
+if [[ "$HERE_MODE" -eq 0 ]]; then
+    case "$DEST" in
+        */src/scorpio/scorpio_mujoco_sim) ;;
+        *)
+            echo "错误: 目标路径异常，拒绝执行: $DEST" >&2
+            exit 1
+            ;;
+    esac
+else
+    # --here: DEST 必须等于 SRC (本包已在 src/ 下, 不做自我复制)
+    if [[ "$DEST" != "$SRC" ]]; then
+        echo "错误: --here 模式目标异常: $DEST" >&2
         exit 1
-        ;;
-esac
+    fi
+fi
 
 echo "源目录:   $SRC"
 echo "目标目录: $DEST"
 echo
 
 # ---- 同步主包 ----
+# --here 模式下本包已在 src/ 下, 跳过自复制
+if [[ "$HERE_MODE" -eq 0 ]]; then
 # --delete: 让目标与源完全一致 (删除源中已移除的文件)
 rsync -a --delete $DRY_RUN \
     --exclude='.git/' \
@@ -64,6 +88,7 @@ rsync -a --delete $DRY_RUN \
     --exclude='venv/' \
     --exclude='.venv/' \
     "$SRC/" "$DEST/"
+fi
 
 # ---- 同步 ROS2 子包到 workspace src/ ----
 # colcon 只扫描 src/ 直接子目录, 不递归. 这 4 个子包在仓库根目录下,

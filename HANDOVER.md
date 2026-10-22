@@ -108,7 +108,8 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 | Kinodynamic A* | `seb_naver_planner/kino_astar.py` | ~670 行 | ✅ | 自行车运动学 + Reeds-Shepp + SDF 碰撞 |
 | ReplanFSM | `seb_naver_planner/planner_node.py` | ~530 行 | ✅ | 5 状态机 + 到达判定 + 定时重规划 |
 | MPC 控制器 | `seb_naver_planner/mpc_node.py` | ~380 行 | ⚠️ | CasADi SQP，偶发迭代超限（有 fallback） |
-| PHR-ALM 轨迹优化 | — | — | ❌ | 论文核心，本工程未实现（直接跟踪 A* 粗路径） |
+| 轨迹优化 (P0) | `seb_naver_planner/trajectory_optimizer.py` | ~490 行 | ✅ | 五次多项式最小 jerk + 运动学约束，CasADi IPOPT；5/5 场景通过 |
+| PHR-ALM 完整版 (P1-P4) | 同上 | — | ⚠️ | SDF 硬约束/地形姿态/Risk 项/换挡未实现 |
 | RViz 可视化 | `config/fastlio.rviz` | — | ✅ | 点云 + 机器人 + 路径 + SetGoal |
 | SE2Grid 可视化 | — | — | ❌ | RViz 无自定义 display 插件，看不出高程图/风险图 |
 
@@ -124,7 +125,7 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 | 障碍物避让 | ⚠️ 能识别墙壁并停下（不撞），但目标在墙后时不绕路 |
 
 **主要缺口**（详见 §8）：
-1. PHR-ALM 轨迹优化未实现 → 轨迹质量与论文有差距
+1. 轨迹优化只完成 P0（几何平滑 + 运动学约束），未接 SDF 避障/地形姿态/Risk，未并入 planner 主流程 → MPC 仍在跟踪 A* 粗路径
 2. 可通行性评估默认关闭 → SDF 只有障碍物二值，没有 slope/curvature 风险
 3. 无全局地图/回环 → 长时间运行 SLAM 会缓慢漂移
 4. 目标在障碍物后方时 A* 不绕路（20m 局部地图限制）
@@ -566,6 +567,26 @@ ros2 run tf2_tools view_frames 2>&1 | grep -oE "base_footprint: .{0,25}"
 | obstacle_point_threshold | 3 | 最少高点数标记 occupied |
 | mahalanobis_threshold | 2.5 | Kalman 异常值拒绝 |
 
+### 5.5 轨迹优化参数 (`TrajectoryOptimizer` 构造参数)
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `wheel_base` | 0.315 | 轴距，用于 κ 上限 |
+| `max_speed` | 0.5 | 速度上限 (m/s) |
+| `max_accel` | 1.0 | 加速度上限 (m/s²) |
+| `max_steer` | 0.785 | 转向上限；`κmax = tan(δmax)/L ≈ 3.17` |
+| `kappa_margin` | 0.85 | 优化用 `0.85·κmax`，给 MPC 跟踪留余量 |
+| `seg_len` | 1.2 | 每段目标弧长 (m)，决定分段数 N（3~10） |
+| `rho_t` | 1.5 | 时间权重 ρt（论文 Eq.22），越大越快 |
+| `follow_path` | true | 分段点作硬约束（P0 无 SDF 时必须 true，否则弯道切角） |
+| `constraint_samples` | 6 | 每段施加动力学约束的采样点数 |
+| `quad_points` | 4 | jerk 积分的 Simpson 求积点数 |
+| `tol` / `max_iter` | 1e-2 / 200 | IPOPT 容差与迭代上限 |
+| `sample_dt` | 0.1 | 输出采样间隔 (s) |
+
+> 求解用 IPOPT + `hessian_approximation=limited-memory`。实测：用精确 Hessian 需 1300ms，
+> 改 L-BFGS 后降到 200~400ms，精度仍满足约束。
+
 ---
 
 ## 6. 测试方法
@@ -705,6 +726,34 @@ for f in seb_naver_planner/seb_naver_planner/*.py; do
 done
 ```
 
+### 6.6 轨迹优化器测试（离线，无需 ROS2）
+
+`TrajectoryOptimizer` 有 5 个场景的离线单测（直线 / L 弯 / S 弯 / U 形掉头 / 真实 A*），
+校验收敛性、起终点精度、速度/曲率/加速度不超限、时间单调、航向连续。
+
+```bash
+cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim/seb_naver_planner
+source /opt/ros/humble/setup.bash
+/usr/bin/python3 test/test_trajectory_optimizer.py
+
+# 期望输出末段:
+#   结果: 5/5 通过
+```
+
+单独调用:
+
+```python
+from seb_naver_planner.trajectory_optimizer import TrajectoryOptimizer
+
+opt = TrajectoryOptimizer({'wheel_base': 0.315, 'max_speed': 0.5, 'max_steer': 0.785})
+res = opt.optimize(astar_path, start_vel=0.3)     # astar_path: [(x, y, theta), ...]
+if res.success:
+    poses = [(x, y, th) for x, y, th, t in res.samples]   # 带时间的平滑轨迹
+    print(f"Tf={res.duration:.2f}s  κ_max={res.max_kappa:.2f}  {res.solve_time_ms:.0f}ms")
+else:
+    poses = astar_path[:-1]                        # 回退到 A* 粗路径
+```
+
 ---
 
 ## 7. 调试指南
@@ -781,7 +830,7 @@ pkill -9 -f rviz2
 
 1. **绕路导航**：目标在障碍物后方时，A* 在 20m 局部地图 + 5s 超时内找不到绕路路径，机器人会停在墙前。需要全球地图或分层规划（全局 + 局部）。实测：plaza 中发 (6,0)（墙在 x=4）→ 停在 x=3.69，不撞墙但也不绕路。
 2. **长时间 SLAM 漂移**：FAST-LIO2 无回环检测，长时间运行后 z 轴有缓慢累积漂移（~0.1m/min）。论文本身就是局部导航不回环。
-3. **PHR-ALM 未实现**：当前直接用 A* 粗略路径，未经过 PHR-ALM 轨迹优化。MPC 直接跟踪 A* 路径，这是与论文最大的差距。
+3. **轨迹优化未接入主流程**：`trajectory_optimizer.py` 已完成 P0（离线可用，5/5 场景通过），但 `planner_node.py` 仍把 A* 粗路径直接发给 MPC。接入需处理 200~400ms 求解对 50Hz FSM 定时器的阻塞（降频 / 异步 / 热启动），见 §8.2。
 4. **可通行性评估默认关闭**：`computeTraversability()` 已实现但 CPU 版处理 320k SE(2) 格太慢，`terrain_analyzer.cpp` 中默认注释掉。因此 SDF 只有障碍物二值，**没有坡度/曲率风险**。
 5. **SDF 是简化版**：不是真正的 signed distance field，而是「高点计数 → occupied」的占用图。
 6. **CasADi 仅 Python**：无 C++ CasADi，MPC 求解在 Python 中运行（~5ms/次，20Hz 够用）。
@@ -790,7 +839,11 @@ pkill -9 -f rviz2
 
 ### 8.2 待办 (TODO)
 
-- [ ] **实现 PHR-ALM 轨迹优化**（论文核心，差距最大）
+- [x] **轨迹优化 P0**：五次多项式最小 jerk + δ/v/a/κ 约束（`trajectory_optimizer.py`，5/5 场景通过，200~400ms）
+- [ ] **轨迹优化 P1**：接 SDF 硬约束（避障）
+- [ ] **轨迹优化 P2**：并入 planner（降频/异步，`Path.header.stamp` 带时间）
+- [ ] **轨迹优化 P3**：订阅 `/fused_map` 加地形姿态 φx/φy 约束
+- [ ] **轨迹优化 P4**：启用可通行性后加 Risk 项；可选 s(t)/换挡（论文完整版）
 - [ ] 用 OpenMP/向量化加速 `computeTraversability()` 并重新启用（恢复坡度/曲率风险）
 - [ ] 真实 SDF 构建（欧氏距离变换），替代高点计数
 - [ ] 增大局部地图或加全局规划器以支持绕路
@@ -844,13 +897,21 @@ colcon build --packages-select scorpio_mujoco_sim  # ~1s
 ### 10.2 同步到上游工作空间
 
 ```bash
-# 本仓库 → /develop/scorpio_ros2/src/ (上游工作区) 及 4 个 ROS2 子包
 cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim
+
+# 同步到上游工作区 /develop/scorpio_ros2 (默认)
 bash sync_to_ros2.sh
 
-# 若只同步到当前工作区 /develop/scorpio_mujoco_sim_ws/src/
-SCORPIO_ROS2_WS=/develop/scorpio_mujoco_sim_ws bash sync_to_ros2.sh
+# 同步到本仓库所在工作区 (/develop/scorpio_mujoco_sim_ws/src/) ← 日常开发用这个
+bash sync_to_ros2.sh --here
+
+# 预览
+bash sync_to_ros2.sh --here --dry-run
 ```
+
+> ⚠️ **常见坑**：只跑 `sync_to_ros2.sh`（不带 `--here`）会把改动同步到
+> `/develop/scorpio_ros2`，而**当前工作区 `/develop/scorpio_mujoco_sim_ws` 不更新**，
+> 导致 `colcon build` 后新文件不存在。日常开发务必用 `--here`。
 
 ### 10.3 Git 推送
 
@@ -894,7 +955,7 @@ no_proxy=github.com git push origin main  # 需要 no_proxy 绕过代理
 | 可通行性评估 (Algorithm 1) | Sec V-B, Alg.1 | 椭圆足迹 + 协方差 + 曲率 + Risk | `terrain_analyzer.cpp::computeTraversability()` | ⚠️ 已实现但 CPU 太慢, 当前禁用 |
 | SDF 构建 | Sec V 末 | 高点统计障碍物检测 | `terrain_analyzer.cpp::timerCallback()` | ✅ 简化版 |
 | Kinodynamic A* 路径搜索 | Sec VI-C | 自行车运动学 + Reeds-Shepp | `kino_astar.py` | ✅ 已移植 |
-| PHR-ALM 轨迹优化 | Sec VI-B, Eq.(14)-(24) | — | — | ❌ 未实现 (直接用 A* 粗路径) |
+| 轨迹优化 | Sec VI-B, Eq.(14)-(24) | P0: 五次多项式 + IPOPT | `seb_naver_planner/trajectory_optimizer.py` | ⚠️ P0 完成，P1-P4 待做 |
 | MPC 跟踪控制器 | Sec IV, Fig.3 | CasADi SQP, N=20, dt=0.05s | `mpc_node.py` | ✅ Python CasADi |
 | SE(2) 栅格消息 | — | SE2Grid.msg, SE2GridInfo.msg | `se2_grid_msgs/msg/` | ✅ 自定义 |
 
