@@ -1,12 +1,27 @@
 # Scorpio MuJoCo 仿真
 
-> **首次使用请先阅读 [DEPLOY.md](DEPLOY.md)** — 完整的环境部署与排查指南。
+> ## 📘 文档地图（新接手请先看这里）
 >
-> **需要与 scorpio_ros2 工作区协作时看 [WORKFLOW.md](WORKFLOW.md)** — 两份副本的同步与合并流程。
+> | 目的 | 看哪个文档 |
+> |------|-----------|
+> | **完整交接说明**（环境/编译/三种模式/测试/调试/已知问题） | **[HANDOVER.md](HANDOVER.md)** ← **主文档** |
+> | 只想快速跑起来 | [HANDOVER.md §3.1 模式总览](HANDOVER.md#31-模式总览) |
+> | 手动键盘开车 | [HANDOVER.md §3.2 模式 A](HANDOVER.md#32-模式-a手动控制纯仿真无-ros2) |
+> | 键盘开车 + 建图 | [HANDOVER.md §3.3 模式 B](HANDOVER.md#33-模式-b手动建图键盘驾驶--fast-lio2-建图) |
+> | 点击目标自动导航 | [HANDOVER.md §3.4 模式 C](HANDOVER.md#34-模式-c自动导航rviz-点击目标全自动) |
+> | 工程完成度 / 缺口 | [HANDOVER.md §1.3 完整性状态](HANDOVER.md#13-工程完整性状态) |
+> | 场景 XML 怎么设计、模型细节 | 本文档 §5、§8（下文） |
 >
-> 快速安装: `pip install -r requirements.txt`，然后配置 X11 (`export XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority`)
+> **历史文档**（描述的是旧版快速原型，部分内容已过时，仅供参考）：
+> [DEPLOY.md](DEPLOY.md)（旧部署指南）、[WORKFLOW.md](WORKFLOW.md)（旧双副本流程）、
+> [ROS2_WORKSPACE.md](ROS2_WORKSPACE.md)（旧 ROS2 工作区版，含 YDLidar G6 时代说明）、
+> [MODEL_STATUS.md](MODEL_STATUS.md)（模型版本记录，2026-09）
+>
+> **快速安装**: `pip install -r requirements.txt`，然后配置 X11 (`export XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority`)
 
-NXROBO Scorpio 机器人的 MuJoCo 仿真环境，支持**阿克曼转向**驱动、**YDLidar G6 激光雷达仿真**、键盘遥控与多场景切换。
+NXROBO Scorpio 机器人的 MuJoCo 仿真环境：**阿克曼转向**、**Livox Mid-360 3D LiDAR 仿真**、键盘遥控、5 个地形场景，并集成 **FAST-LIO2 SLAM + SEB-Naver 自主导航**。
+
+> 注：早期版本使用 YDLidar G6 2D 雷达（见 `ROS2_WORKSPACE.md`），现已改为 Livox Mid-360 3D 点云（`/livox/lidar`，360×32 线，10Hz）。2D `/scan` 仍保留但主要用于兼容。
 
 ---
 

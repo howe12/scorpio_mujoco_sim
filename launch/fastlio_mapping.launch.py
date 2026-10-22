@@ -10,7 +10,7 @@ FAST-LIO2 3D 建图启动文件
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -22,24 +22,31 @@ def generate_launch_description():
     terrain = LaunchConfiguration('terrain')
     use_sim = LaunchConfiguration('sim')
     use_rviz = LaunchConfiguration('rviz')
+    sim_gui = LaunchConfiguration('sim_gui')
 
     urdf_path = PathJoinSubstitution([pkg_share, 'models', 'scorpio_rviz.urdf'])
+
+    # sim_gui=true → GUI 模式 (MuJoCo 窗口, 可键盘驾驶), 否则 headless (纯 RViz)
+    sim_mode = PythonExpression(["'--ros2' if '", sim_gui, "' == 'true' else '--headless-ros2'"])
 
     return LaunchDescription([
         DeclareLaunchArgument('terrain', default_value='plaza'),
         DeclareLaunchArgument('sim', default_value='true'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('sim_gui', default_value='false',
+                              description='true → 弹出 MuJoCo 窗口 (可键盘驾驶); false → headless'),
 
-        # --- MuJoCo 仿真 (GUI + ROS2) ---
+        # --- MuJoCo 仿真 ---
         ExecuteProcess(
             cmd=[
                 '/usr/bin/python3',
                 PathJoinSubstitution([pkg_share, 'scripts', 'run_seb_naver_sim.py']),
                 '--terrain', terrain,
-                '--ros2',
+                sim_mode,
+                '--no-tf-odom',
             ],
             name='scorpio_mujoco_sim',
-            output='screen',
+            output='log',
             condition=IfCondition(use_sim),
         ),
 

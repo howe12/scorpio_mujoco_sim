@@ -1,6 +1,15 @@
 # Scorpio MuJoCo 仿真 + SEB-Naver 自主导航系统 — 交接文档
 
-> 本文档面向新接手本工程的开发者或 AI Agent，涵盖环境准备、编译、运行、测试、调试和已知问题。
+> 本文档面向新接手本工程的开发者或 AI Agent，涵盖环境准备、三种运行模式、测试、调试和已知问题。
+>
+> **快速导航**
+> - 只想跑起来 → [§2 环境准备](#2-环境准备) + [§3.1 模式总览](#31-模式总览)
+> - 手动开车 → [§3.2 模式 A](#32-模式-a手动控制纯仿真无-ros2)
+> - 键盘开车 + 建图 → [§3.3 模式 B](#33-模式-b手动建图键盘驾驶--fast-lio2-建图)
+> - 点击导航 → [§3.4 模式 C](#34-模式-c自动导航rviz-点击目标全自动)
+> - 遇到问题 → [§7 调试指南](#7-调试指南)
+> - 想改参数 → [§5 关键参数](#5-关键参数说明)
+> - 工程完成度 → [§1.3 完整性状态](#13-工程完整性状态)
 
 ---
 
@@ -9,6 +18,8 @@
 本项目是 **NXROBO Scorpio 机器人**的 MuJoCo 物理仿真 + ROS2 自主导航系统，复现论文 *"SEB-Naver: A SE(2)-based Local Navigation Framework for Car-like Robots on Uneven Terrain"* 的核心算法。
 
 **核心能力**：在 MuJoCo 仿真环境中，机器人通过 3D LiDAR + IMU 进行 SLAM 定位，构建局部高程图并检测障碍物，使用 Kinodynamic A* 规划路径，MPC 跟踪控制，实现 RViz SetGoal 点击式自主导航。
+
+**三种使用模式**：手动控制（纯仿真验证）、手动建图（键盘驾驶 + SLAM）、自动导航（点击目标全自动）。详见 §3。
 
 ### 1.1 技术栈
 
@@ -74,6 +85,49 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 > **为什么需要 rsync 副本？** colcon 只扫描 `src/` 的**直接子目录**，不会递归进入 `scorpio_mujoco_sim/seb_naver_planner/`。所以 4 个 ROS2 子包必须在 `src/` 下有独立目录才能被 colcon 发现。`sync_to_ros2.sh` 会自动完成这个复制。
 >
 > **开发流程**：在 `src/scorpio_mujoco_sim/` 里改代码 → 运行 `bash sync_to_ros2.sh` → `colcon build`。
+
+### 1.3 工程完整性状态
+
+下表是本工程各模块的**实际状态**。状态含义：
+- ✅ **可用** — 已实测通过
+- ⚠️ **可用但有局限** — 能跑，已知边界
+- ❌ **未实现** — 论文有、本工程没有
+
+| 模块 | 文件 | 规模 | 状态 | 说明 |
+|------|------|------|------|------|
+| MuJoCo 物理仿真 | `models/scorpio.xml`, `worlds/*.xml` | 1.9k 行 XML | ✅ | Ackermann 车 + 5 场景，timestep=0.001 |
+| 仿真主循环 | `scripts/run_seb_naver_sim.py` | ~600 行 | ✅ | 3 种模式（GUI/headless/benchmark） |
+| 传感器发布 | `scripts/scorpio_ros2_publisher.py` | ~600 行 | ✅ | LiDAR/IMU/odom/wheel_odom（含打滑置信度） |
+| LiDAR 射线仿真 | `scripts/lidar_simulator.py` + `run_seb_naver_sim.py` | — | ✅ | `mj_ray` 瞬时投射，360×32 线 |
+| 地形生成 | `scripts/generate_terrain.py` | ~300 行 | ✅ | hfield + 树木布置 |
+| FAST-LIO2 SLAM | `FAST_LIO/src/*` | ~2.7k 行 C++ | ✅ | 修改版：wheel_odom 校正、det_range=40 |
+| SE(2) 栅格核心 | `se2_grid_core/` | ~2.2k 行 C++ | ✅ | 从 SEB-Naver 原版移植 |
+| 高程图构建 | `terrain_analyzer/src/terrain_analyzer.cpp` | ~640 行 | ✅ | Kalman 融合 + 补洞 + 障碍物检测 |
+| 可通行性评估 (Alg.1) | 同上 `computeTraversability()` | — | ⚠️ | 已实现但 CPU 320k 格太慢，**默认注释** |
+| SDF 占用图 | 同上 | — | ⚠️ | 简化版：高点计数（非真实 signed distance） |
+| Kinodynamic A* | `seb_naver_planner/kino_astar.py` | ~670 行 | ✅ | 自行车运动学 + Reeds-Shepp + SDF 碰撞 |
+| ReplanFSM | `seb_naver_planner/planner_node.py` | ~530 行 | ✅ | 5 状态机 + 到达判定 + 定时重规划 |
+| MPC 控制器 | `seb_naver_planner/mpc_node.py` | ~380 行 | ⚠️ | CasADi SQP，偶发迭代超限（有 fallback） |
+| PHR-ALM 轨迹优化 | — | — | ❌ | 论文核心，本工程未实现（直接跟踪 A* 粗路径） |
+| RViz 可视化 | `config/fastlio.rviz` | — | ✅ | 点云 + 机器人 + 路径 + SetGoal |
+| SE2Grid 可视化 | — | — | ❌ | RViz 无自定义 display 插件，看不出高程图/风险图 |
+
+**实测验证结论**（2026-10，plaza 场景）：
+
+| 项目 | 结果 |
+|------|------|
+| 编译 | 7 个包全部通过 |
+| 模式 A 手动控制 | ✅ GNU 窗口 + 键盘，MANUAL 状态正常，初始 yaw=0° |
+| 模式 B 手动建图 | ✅ 静止地图 10.4 万点；移动 8s 后 15.6 万点；SLAM 位姿跟随 |
+| 模式 C 自动导航 | ✅ 目标 (3,0) → 到达 (2.99,-0.04)，SLAM 偏差 0.1m，`Goal reached!` |
+| TF 树 | ✅ `camera_init→body→base_footprint→base_link→…` 单一父节点 |
+| 障碍物避让 | ⚠️ 能识别墙壁并停下（不撞），但目标在墙后时不绕路 |
+
+**主要缺口**（详见 §8）：
+1. PHR-ALM 轨迹优化未实现 → 轨迹质量与论文有差距
+2. 可通行性评估默认关闭 → SDF 只有障碍物二值，没有 slope/curvature 风险
+3. 无全局地图/回环 → 长时间运行 SLAM 会缓慢漂移
+4. 目标在障碍物后方时 A* 不绕路（20m 局部地图限制）
 
 ---
 
@@ -153,9 +207,84 @@ source install/setup.bash
 
 ---
 
-## 3. 运行方式
+## 3. 三种运行模式
 
-### 3.1 完整自主导航 (推荐)
+本工程有 **三种主要使用模式**，用途不同、启动的节点不同。先看对比表，再按需选择。
+
+### 3.1 模式总览
+
+| | **A. 手动控制** | **B. 手动建图** | **C. 自动导航** |
+|---|---|---|---|
+| **用途** | 验证物理/运动学、学键盘操作 | 人工驾驶同时建 3D 地图 | 点击目标，机器人自主导航 |
+| **谁控制车** | 你（键盘） | 你（键盘） | MPC 控制器 |
+| **启动命令** | `python3 run_seb_naver_sim.py` | `ros2 launch ... fastlio_mapping.launch.py` | `ros2 launch ... seb_naver_full.launch.py` |
+| **需要 ROS2** | ❌ 不需要 | ✅ 需要 | ✅ 需要 |
+| **MuJoCo 窗口** | ✅ 必须 | ✅ 必须（键盘驾驶） | 可选（`sim_gui:=true`） |
+| **RViz** | ❌ | ✅ 建图可视化 | ✅ 地图+路径+机器人 |
+| **启动节点数** | 1 | 4 | 7 |
+| **SLAM** | ❌ 无 | ✅ FAST-LIO2 | ✅ FAST-LIO2 |
+| **规划/控制** | ❌ 无 | ❌ 无 | ✅ A* + MPC |
+| **典型用途** | 调物理参数 | 采集地图、验证 SLAM | 验证完整导航链路 |
+
+> **共同前置**（每次新终端都要执行）：
+> ```bash
+> source /opt/ros/humble/setup.bash
+> source /develop/scorpio_mujoco_sim_ws/install/setup.bash
+> export DISPLAY=:0
+> export XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority
+> ```
+
+---
+
+### 3.2 模式 A：手动控制（纯仿真，无 ROS2）
+
+**用途**：最快验证仿真环境是否正常、调物理参数、学习机器人操作手感。不涉及 SLAM 和导航。
+
+```bash
+cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim
+source /opt/ros/humble/setup.bash          # 仅为导入 rclpy 依赖
+export DISPLAY=:0
+export XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority
+
+/usr/bin/python3 scripts/run_seb_naver_sim.py --terrain plaza
+```
+
+**会弹出**：一个 MuJoCo 3D 窗口（可直接拖拽旋转、滚轮缩放）。
+
+**键盘操作**：
+
+| 按键 | 功能 |
+|------|------|
+| `W` / `↑` | 加速前进（按住） |
+| `S` / `↓` | 倒车（按住） |
+| `A` / `←` | 左转（按住，松开自动回正） |
+| `D` / `→` | 右转（按住，松开自动回正） |
+| `Q` / `E` | 前进+左转 / 前进+右转 |
+| `Z` / `C` | 倒车+左转 / 倒车+右转 |
+| `Space` | 刹车（速度归零） |
+| `R` | 复位（速度、转向归零） |
+| `Tab` | 切换 手动 ↔ 内置自动巡航（`simple_controller`） |
+| `ESC` | 退出 |
+
+**屏幕上方的状态行**（每 0.5s 刷新）：
+```
+[MANUAL] t=  5.0s | v=0.49m/s(令+0.50) str= +5.2° | pos=(1.20,0.30) yaw=+14° | goal=13.2m
+```
+- `v` = 实际线速度，`令` = 指令值
+- `str` = 前轮转角
+- `yaw` = 车头朝向（应初始为 `-0°`，见 §9 坐标系决策）
+- `goal` = 到场景内置 `goal_site` 的距离（仅显示，导航不用它）
+
+**注意事项**：
+- 这是**纯本地仿真**，不发布任何 ROS2 话题（除非加 `--ros2`）
+- 退出时进程会 `os._exit(0)` 规避 NVIDIA GLFW 清理段错误，看到 `Killed` 属正常
+- 若窗口不出现：检查 `DISPLAY` / `XAUTHORITY`，或改用 headless 模式验证
+
+---
+
+### 3.3 模式 B：手动建图（键盘驾驶 + FAST-LIO2 建图）
+
+**用途**：人工开车，同时用 FAST-LIO2 建立 3D 点云地图，在 RViz 中实时观察建图质量。这是验证 SLAM 是否正常的主要方式。
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -163,41 +292,153 @@ source /develop/scorpio_mujoco_sim_ws/install/setup.bash
 export DISPLAY=:0
 export XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority
 
-# 纯 RViz (无 MuJoCo 窗口, 后台仿真)
-ros2 launch seb_naver_planner seb_naver_full.launch.py terrain:=plaza
+# GUI 模式：MuJoCo 窗口（键盘驾驶） + RViz（看地图）
+ros2 launch scorpio_mujoco_sim fastlio_mapping.launch.py terrain:=plaza sim_gui:=true
 
-# 带 MuJoCo 3D 窗口
-ros2 launch seb_naver_planner seb_naver_full.launch.py terrain:=plaza sim_gui:=true
-
-# 可选参数
-#   terrain:= plaza | forest | mountain | pump_track | snowy_mountain
-#   sim_gui:= true | false  (默认 false)
-#   rviz:=    true | false  (默认 true)
-#   sim:=     true | false  (默认 true, 设为 false 可接真实机器人)
+# headless 模式：无 MuJoCo 窗口，只发数据 + RViz（用 /cmd_vel 驱动）
+ros2 launch scorpio_mujoco_sim fastlio_mapping.launch.py terrain:=plaza
 ```
 
-启动后在 RViz 中使用 **SetGoal** 工具（绿色箭头图标）点击目标位置，机器人自主导航。
+**启动的 4 个节点**：
 
-### 3.2 仅建图 (不导航)
+| 节点 | 作用 |
+|------|------|
+| `scorpio_mujoco_sim` | MuJoCo 物理仿真 + 发布 LiDAR/IMU/odom |
+| `robot_state_publisher` | 从 URDF 发布 `base_footprint→base_link→...` 静态 TF |
+| `fastlio_mapping` | FAST-LIO2，发布 `/Odometry` + `/cloud_registered` + `/Laser_map` |
+| `static_transform_publisher` | 补 `body→base_footprint`（连接 SLAM 系与 URDF） |
 
+**怎么操作**：
+1. 弹出 MuJoCo 窗口 → 用键盘 `W/A/S/D` 开车
+2. RViz 中观察：
+   - **Laser Map**（`/Laser_map`）：累积的 3D 点云地图，应随行驶扩展
+   - **Registered Cloud**（`/cloud_registered`）：当前帧配准点云
+   - **Odometry**（`/Odometry`）：机器人位姿箭头
+3. 地图应**闭合、无重影**。若出现重影/分层 → SLAM 漂移，见 §7 调试
+
+**建图质量检查命令**：
+
+```bash
+# 地图点数（行驶后应持续增长）
+ros2 topic echo /Laser_map --once | grep width
+
+# SLAM 位姿（应与 /odom 真值接近）
+ros2 topic echo /Odometry --once | grep -A2 "position:"
+ros2 topic echo /odom --once | grep -A2 "position:"
+```
+
+**headless 模式下如何开车**（无键盘）：
+```bash
+# 用 cmd_vel 驱动
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.4}, angular: {z: 0.1}}" --rate 20
+```
+
+**注意**：本模式**没有** planner/MPC，`Tab` 键的自动巡航只在模式 A（纯本地）生效。此模式下 `--no-tf-odom` 已由 launch 传入，不要手动去掉，否则 TF 冲突（见 §4.2）。
+
+---
+
+### 3.4 模式 C：自动导航（RViz 点击目标，全自动）
+
+**用途**：验证完整导航链路（SLAM → 高程图/障碍物 → A* → MPC）。这是本工程的核心功能。
+
+```bash
+source /opt/ros/humble/setup.bash
+source /develop/scorpio_mujoco_sim_ws/install/setup.bash
+export DISPLAY=:0
+export XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority
+
+# 推荐：纯 RViz 控制（仿真在后台跑，无 MuJoCo 窗口）
+ros2 launch seb_naver_planner seb_naver_full.launch.py terrain:=plaza
+
+# 或：同时弹出 MuJoCo 窗口（看物理真相 + RViz 看算法视图）
+ros2 launch seb_naver_planner seb_naver_full.launch.py terrain:=plaza sim_gui:=true
+```
+
+**启动的 7 个节点**：
+
+| 节点 | 作用 | 关键输出 |
+|------|------|----------|
+| `scorpio_mujoco_sim` | 物理仿真 + 传感器 + 执行 cmd_vel | `/livox/lidar`, `/imu/data`, `/odom` |
+| `robot_state_publisher` | URDF → TF | `base_footprint→base_link→lidar_link` |
+| `fastlio_mapping` | 3D SLAM 定位 | `/Odometry`, `/cloud_registered` |
+| `terrain_analyzer` | 高程图 + 障碍物 SDF | `/sdf_map`, `/fused_map` |
+| `seb_naver_planner` | Kinodynamic A* + ReplanFSM | `/planner/trajectory` |
+| `mpc_controller` | MPC 轨迹跟踪 | `/cmd_vel` |
+| `static_transform_publisher` | `body→base_footprint` | — |
+
+**完整操作流程**：
+
+1. **等待就绪**（约 30-40 秒）。确认日志出现：
+   ```bash
+   # 挂到终端观察, 或看日志
+   grep -E "SQP solver|Planner initialized|Initialize the map|Frame 30" ~/.ros/log/latest/*.log
+   ```
+
+2. **在 RViz 中选 SetGoal 工具**（工具栏绿色箭头图标，即 "2D Nav Goal"）
+
+3. **在 RViz 3D 视图的地面上点击目标点**（可拖拽确定朝向）。RViz 会把点击位置转换成 `camera_init` 系坐标，发布到 `/goal_pose`。
+
+4. **观察机器人**：
+   - RViz 中机器人模型（URDF）沿 **Planner Path**（红色）行驶
+   - **A* Rough Path**（蓝色）是搜索的原始路径
+   - `/planner/status` 显示 FSM 状态：`SEQUENTIAL_START → EXEC_TRAJ ⇄ REPLAN_TRAJ → WAIT_TARGET`
+
+5. **到达目标后**：planner 打印 `Goal reached!`，FSM 回到 `WAIT_TARGET`，可再次点击新目标。
+
+**不用 RViz 点击也可以发目标**（适合脚本化测试）：
+```bash
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: 'camera_init'}, pose: {position: {x: 3.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}"
+```
+
+**可选 launch 参数**：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `terrain` | `plaza` | `plaza` / `forest` / `mountain` / `pump_track` / `snowy_mountain` |
+| `sim_gui` | `false` | `true` 弹出 MuJoCo 窗口 |
+| `rviz` | `true` | `false` 不启动 RViz（纯 headless 跑算法） |
+| `sim` | `true` | `false` 不启动仿真（接真实机器人时用） |
+
+**导航成功判据**：
+```bash
+ros2 topic echo /odom --once | grep -A2 "position:"      # 接近目标点
+ros2 topic echo /Odometry --once | grep -A2 "position:"  # SLAM 与真值偏差 < 1m
+ros2 topic echo /planner/status --once                   # WAIT_TARGET (已到达)
+```
+
+---
+
+### 3.5 辅助模式
+
+**Headless 性能基准**（跑所有地形，不需要 ROS2/GUI）：
+```bash
+cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim
+python3 scripts/run_seb_naver_sim.py --headless
+```
+
+**仅地形成图**（不启动 planner/MPC，只看高程图 + SDF）：
 ```bash
 ros2 launch terrain_analyzer terrain_mapping.launch.py terrain:=forest
 ```
 
-### 3.3 手动键盘控制 (不启动 ROS2)
-
+**2D SLAM 建图**（历史方案，slam_toolbox + `/scan`，非当前导航链路）：
 ```bash
-cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim
-python3 scripts/run_seb_naver_sim.py --terrain plaza
-# W/S 前进后退, A/D 转向, Tab 切换自动导航, ESC 退出
+ros2 launch scorpio_mujoco_sim slam_mapping.launch.py terrain:=plaza
 ```
+> 该方案用 2D 激光 + `odom→base_footprint` TF，**不用于** SEB-Naver 导航（导航用 FAST-LIO2 3D）。
 
-### 3.4 Headless 基准测试
+---
 
-```bash
-python3 scripts/run_seb_naver_sim.py --headless
-# 在所有地形上跑性能基准
-```
+### 3.6 launch 文件对照表
+
+| launch 文件 | 包 | 节点 | 用途 |
+|-------------|-----|------|------|
+| `fastlio_mapping.launch.py` | `scorpio_mujoco_sim` | sim + rsp + fastlio + static_tf + rviz | **模式 B** 手动建图 |
+| `seb_naver_full.launch.py` | `seb_naver_planner` | 上述 + terrain_analyzer + planner + mpc | **模式 C** 自动导航 |
+| `terrain_mapping.launch.py` | `terrain_analyzer` | sim + rsp + fastlio + terrain_analyzer + static_tf + rviz | 仅地形成图 |
+| `slam_mapping.launch.py` | `scorpio_mujoco_sim` | sim + slam_toolbox + rviz | 2D SLAM（历史） |
+| `scorpio_mujoco.launch.py` | `scorpio_mujoco_sim` | sim bridge | 仅启动仿真桥 |
 
 ---
 
@@ -251,7 +492,18 @@ camera_init  ← FAST-LIO2 世界系 (SLAM 原点)
                  └── right_front_wheel
 ```
 
-> ⚠️ **TF 冲突陷阱**：sim 的 `--no-tf-odom` 参数阻止发布 `odom→base_footprint`。如果漏传此参数（如 GUI 模式旧 bug），`base_footprint` 会有两个父节点（`odom` 和 `body`），导致 RViz 小车模型显示失败。**已修复**，但修改 sim 启动参数时务必保留 `--no-tf-odom`。
+> ⚠️ **TF 冲突陷阱**：sim 的 `--no-tf-odom` 参数阻止发布 `odom→base_footprint`。若漏传，`base_footprint` 会有两个父节点（`odom` 和 `body`），RViz 小车模型显示失败、画面混乱，且**第一次导航可能正常、第二次出错**。
+>
+> **现状**：`fastlio_mapping.launch.py`、`terrain_mapping.launch.py`、`seb_naver_full.launch.py` 三个 launch 都已传 `--no-tf-odom` 并支持 `sim_gui` 参数。
+>
+> **例外**：`slam_mapping.launch.py`（2D slam_toolbox 方案）**故意不传** `--no-tf-odom`，因为它依赖 sim 的 `odom→base_footprint` 做 2D SLAM，且该 launch 没有 `body→base_footprint` 的 static TF，所以不冲突。
+
+验证 TF 是否健康：
+```bash
+ros2 run tf2_tools view_frames 2>&1 | grep -oE "base_footprint: .{0,25}"
+# 期望: base_footprint: \n  parent: 'body'      ← 正确
+# 若为 'odom' → TF 冲突，检查是否漏传 --no-tf-odom
+```
 
 ---
 
@@ -318,7 +570,42 @@ camera_init  ← FAST-LIO2 世界系 (SLAM 原点)
 
 ## 6. 测试方法
 
-### 6.1 基本功能测试
+### 6.1 分模式冒烟测试（最快验证）
+
+**模式 A 冒烟**（10 秒）：
+```bash
+cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim
+export DISPLAY=:0 XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority
+timeout 10 /usr/bin/python3 scripts/run_seb_naver_sim.py --terrain plaza 2>&1 | grep -E "Keyboard|MANUAL" | head -3
+# 期望: 打印键盘说明 + [MANUAL] 状态行, 弹出 MuJoCo 窗口
+```
+
+**模式 B 冒烟**（40 秒）：
+```bash
+source /opt/ros/humble/setup.bash && source /develop/scorpio_mujoco_sim_ws/install/setup.bash
+ros2 launch scorpio_mujoco_sim fastlio_mapping.launch.py terrain:=plaza rviz:=false > /tmp/smoke_b.log 2>&1 &
+sleep 40
+grep -c "process started" /tmp/smoke_b.log          # 期望: 4
+ros2 topic echo /Laser_map --once | grep width      # 期望: > 10000
+ros2 run tf2_tools view_frames 2>&1 | grep -oE "base_footprint: .{0,20}"  # 期望 parent: 'body'
+```
+
+**模式 C 冒烟**（60 秒）：
+```bash
+ros2 launch seb_naver_planner seb_naver_full.launch.py terrain:=plaza rviz:=false > /tmp/smoke_c.log 2>&1 &
+sleep 45
+grep -c "process started" /tmp/smoke_c.log          # 期望: 7
+ros2 topic echo /sdf_map --once | grep length_x     # 期望: 20.0
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: 'camera_init'}, pose: {position: {x: 3.0, y: 0.0}, orientation: {w: 1.0}}}"
+sleep 18
+ros2 topic echo /odom --once | grep -A2 "position:" # 期望 x≈3.0
+grep "Goal reached" /tmp/smoke_c.log                # 期望有一行
+```
+
+> 每次测试前先 `/develop/scorpio_mujoco_sim_ws/clean_ros.sh`，避免残留进程干扰。
+
+### 6.2 完整链路测试
 
 ```bash
 # 1. 编译检查
@@ -358,7 +645,7 @@ ros2 topic echo /Odometry --once | grep -A2 "position:"
 /develop/scorpio_mujoco_sim_ws/clean_ros.sh
 ```
 
-### 6.2 避障测试
+### 6.3 避障测试
 
 ```bash
 # plaza 场景有墙壁 wall_low_1 在 x=4.0
@@ -369,7 +656,7 @@ ros2 topic echo /odom --once | grep -A2 "position:"
 # 期望: x < 4.0 (停在墙前, 不撞墙)
 ```
 
-### 6.3 多场景测试
+### 6.4 多场景测试
 
 ```bash
 for terrain in plaza forest mountain pump_track snowy_mountain; do
@@ -385,7 +672,7 @@ for terrain in plaza forest mountain pump_track snowy_mountain; do
 done
 ```
 
-### 6.4 单元测试 (无需 ROS2)
+### 6.5 单元测试 (无需 ROS2)
 
 ```bash
 # MuJoCo 物理稳定性测试
@@ -413,7 +700,7 @@ print('✅ 物理稳定性测试通过')
 "
 
 # Python 语法检查
-for f in src/seb_naver_ros2/seb_naver_planner/seb_naver_planner/*.py; do
+for f in seb_naver_planner/seb_naver_planner/*.py; do
     python3 -c "import py_compile; py_compile.compile('$f', doraise=True)" && echo "✅ $(basename $f)"
 done
 ```
@@ -426,15 +713,18 @@ done
 
 | 症状 | 原因 | 修复 |
 |------|------|------|
-| RViz 小车模型不显示 / 乱跳 | TF 冲突 (base_footprint 多父) | 确认 sim 启动带 `--no-tf-odom`; 运行 `clean_ros.sh` |
+| RViz 小车模型不显示 / 乱跳 | TF 冲突 (`base_footprint` 多父) | 三个 launch 都已传 `--no-tf-odom`；若手动启动 sim 必须加该参数；再运行 `clean_ros.sh` |
 | SLAM 定位爆炸 (坐标千万级) | 残留进程发 cmd_vel 导致转弯失稳 | `clean_ros.sh` 后重启 |
-| SLAM z 轴漂移 (悬空几米) | 不平地形初始悬空 → IMU 初始化污染 | 已修复 (snap_to_ground + 稳定期) |
-| 导航方向反 / 偏转 | 初始朝向非 0° → 坐标系偏差 | 已修复 (reset_robot_facing_goal 设 yaw=0) |
-| 机器人不动 | terrain_analyzer 未启动 → 无 SDF → planner 等待 | 检查 `ros2 topic list \| grep sdf_map` |
+| SLAM z 轴漂移 (悬空几米) | 不平地形初始悬空 → IMU 初始化污染 | 已修复 (snap_to_ground + 2s 稳定期) |
+| 导航方向反 / 偏转 | 初始朝向非 0° → 坐标系偏差 | 已修复 (`reset_robot_facing_goal` 设 yaw=0) |
+| 机器人不动 | `terrain_analyzer` 未启动 → 无 SDF → planner 等待 | `ros2 topic list \| grep sdf_map` |
 | MPC solver failed | 短程转弯 SQP 迭代超限 | 已有 fallback (沿用上次控制衰减) |
 | 撞墙 | SDF 无障碍物信息 | 已修复 (高点统计标记 occupied) |
-| `No Effective Points` 持续 | det_range 太大 (默认 300) 清空地图 | 已修复 (det_range=40) |
+| 目标在墙后不动 | A* 20m 局部地图内找不到绕路 | 已知局限 (§8.1)，改发可绕行目标 |
+| `No Effective Points` 持续 | `det_range` 太大 (默认 300) 清空地图 | 已修复 (det_range=40) |
 | 转弯时速度爆炸 70+ m/s | timestep > 0.002 数值发散 | 已修复 (timestep=0.001) |
+| MuJoCo 窗口不弹 | `sim_gui:=false` 或 DISPLAY 未设 | 加 `sim_gui:=true` 并检查 `DISPLAY`/`XAUTHORITY` |
+| launch 报 "xacro/urdf not found" | 未 source install | `source install/setup.bash` |
 
 ### 7.2 诊断命令
 
@@ -489,21 +779,25 @@ pkill -9 -f rviz2
 
 ### 8.1 已知局限
 
-1. **绕路导航**：目标在障碍物后方时，A* 在 20m 地图 + 5s 超时内可能找不到绕路路径。需要更大地图或分层规划（全局 + 局部）。
+1. **绕路导航**：目标在障碍物后方时，A* 在 20m 局部地图 + 5s 超时内找不到绕路路径，机器人会停在墙前。需要全球地图或分层规划（全局 + 局部）。实测：plaza 中发 (6,0)（墙在 x=4）→ 停在 x=3.69，不撞墙但也不绕路。
 2. **长时间 SLAM 漂移**：FAST-LIO2 无回环检测，长时间运行后 z 轴有缓慢累积漂移（~0.1m/min）。论文本身就是局部导航不回环。
-3. **PHR-ALM 未实现**：当前直接用 A* 粗略路径，未经过 PHR-ALM 轨迹优化。MPC 直接跟踪 A* 路径。
-4. **CasADi 仅 Python**：无 C++ CasADi，MPC 求解在 Python 中运行（~5ms/次，20Hz 够用）。
-5. **seb_naver_ros2 无远程仓库**：仅在本地，未推送 GitHub。
-6. **RViz SE2Grid 可视化**：高程图/风险图无法在 RViz 中直接显示（需要自定义 display 插件）。
+3. **PHR-ALM 未实现**：当前直接用 A* 粗略路径，未经过 PHR-ALM 轨迹优化。MPC 直接跟踪 A* 路径，这是与论文最大的差距。
+4. **可通行性评估默认关闭**：`computeTraversability()` 已实现但 CPU 版处理 320k SE(2) 格太慢，`terrain_analyzer.cpp` 中默认注释掉。因此 SDF 只有障碍物二值，**没有坡度/曲率风险**。
+5. **SDF 是简化版**：不是真正的 signed distance field，而是「高点计数 → occupied」的占用图。
+6. **CasADi 仅 Python**：无 C++ CasADi，MPC 求解在 Python 中运行（~5ms/次，20Hz 够用）。
+7. **MPC 数值鲁棒性**：短程急转弯时偶发 `Maximum_Iterations_Exceeded`（已有 fallback：沿用上次控制 50% 衰减）。
+8. **RViz SE2Grid 可视化**：高程图/风险图无法在 RViz 中直接显示（需要自定义 display 插件），只能通过 `/sdf_map` 原始消息查看。
 
 ### 8.2 待办 (TODO)
 
-- [ ] 实现 PHR-ALM 轨迹优化 (Python CasADi)
-- [ ] 增大 SDF 地图或实现分层规划以支持绕路
-- [ ] forest/mountain 场景的完整导航验证
-- [ ] seb_naver_ros2 推送到 GitHub
+- [ ] **实现 PHR-ALM 轨迹优化**（论文核心，差距最大）
+- [ ] 用 OpenMP/向量化加速 `computeTraversability()` 并重新启用（恢复坡度/曲率风险）
+- [ ] 真实 SDF 构建（欧氏距离变换），替代高点计数
+- [ ] 增大局部地图或加全局规划器以支持绕路
+- [ ] forest / mountain / pump_track / snowy_mountain 场景的完整导航验证（目前主要验证 plaza）
+- [ ] MPC 换 IPOPT 或加软约束以提升数值鲁棒性
 - [ ] RViz SE2Grid 可视化插件
-- [ ] 真实机器人部署 (替换 MuJoCo sim 为真实 LiDAR/IMU)
+- [ ] 真实机器人部署（`sim:=false`，替换 MuJoCo 为真实 LiDAR/IMU）
 
 ---
 
@@ -520,6 +814,8 @@ pkill -9 -f rviz2
 | MPC 控制平滑 (Δδ≤0.15/步) | 消除重规划导致的 ±δmax 极限转向横跳 → 物理甩动 → IMU 178 m/s² |
 | SDF occupied=-1.0 (高点≥3) | 原 SDF 只有 free/unknown, A* 碰撞检测永远 True → 撞墙 |
 | sim output='log' | headless 状态行每 2s 刷屏终端 |
+| **所有 launch 统一 `sim_gui` + `--no-tf-odom`** | 早期 `fastlio_mapping.launch.py` 硬编码 GUI 且漏传 `--no-tf-odom` → TF 冲突。三个 launch 现参数一致 |
+| **4 个 ROS2 包平铺仓库根目录** | colcon 只扫 `src/` 直接子目录，不递归；`sync_to_ros2.sh` 负责 rsync |
 
 ---
 
@@ -528,6 +824,10 @@ pkill -9 -f rviz2
 ### 10.1 修改后必须重新编译
 
 ```bash
+# 先同步 (改的是仓库里的文件, workspace src/ 是副本)
+cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim
+bash sync_to_ros2.sh
+
 # Python 包 (seb_naver_planner)
 colcon build --packages-select seb_naver_planner
 
@@ -544,19 +844,23 @@ colcon build --packages-select scorpio_mujoco_sim  # ~1s
 ### 10.2 同步到上游工作空间
 
 ```bash
-# scorpio_mujoco_sim 有 sync 脚本
+# 本仓库 → /develop/scorpio_ros2/src/ (上游工作区) 及 4 个 ROS2 子包
 cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim
-bash sync_to_ros2.sh  # rsync 到 /develop/scorpio_ros2/src/
+bash sync_to_ros2.sh
+
+# 若只同步到当前工作区 /develop/scorpio_mujoco_sim_ws/src/
+SCORPIO_ROS2_WS=/develop/scorpio_mujoco_sim_ws bash sync_to_ros2.sh
 ```
 
 ### 10.3 Git 推送
 
 ```bash
-# scorpio_mujoco_sim → GitHub
+# 单仓库: 全部代码 (仿真 + 4 个 ROS2 包) 都在这里
 cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim
 no_proxy=github.com git push origin main  # 需要 no_proxy 绕过代理
 
-# seb_naver_ros2 → 无远程 (本地 only)
+# 注意: FAST_LIO/ 和 livox_ros_driver2/ 在 workspace 的 src/ 下, 但不在本仓库内
+#      它们是本地 fork, 不随本仓库推送
 ```
 
 ---
