@@ -108,8 +108,8 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 | Kinodynamic A* | `seb_naver_planner/kino_astar.py` | ~670 行 | ✅ | 自行车运动学 + Reeds-Shepp + SDF 碰撞 |
 | ReplanFSM | `seb_naver_planner/planner_node.py` | ~530 行 | ✅ | 5 状态机 + 到达判定 + 定时重规划 |
 | MPC 控制器 | `seb_naver_planner/mpc_node.py` | ~380 行 | ⚠️ | CasADi SQP，偶发迭代超限（有 fallback） |
-| 轨迹优化 (P0+P1) | `seb_naver_planner/trajectory_optimizer.py` | ~800 行 | ✅ | 五次多项式最小 jerk + 运动学约束 + **SDF 避障**（距离场 + outside-in 排斥）；P0 5/5、P1 6/6 |
-| PHR-ALM 完整版 (P2-P4) | 同上 | — | ⚠️ | 未并入 planner 主流程；地形姿态/Risk/换挡未做；弯道曲率有局限 |
+| 轨迹优化 (P0+P1+P2) | `trajectory_optimizer.py` + `planner_node.py` | ~1100 行 | ✅ | 五次多项式最小 jerk + SDF 避障 + **异步接入 planner**；P0 5/5、P1 6/6、P2 集成 3/3、端到端到达 |
+| PHR-ALM 完整版 (P2.5-P4) | 同上 | — | ⚠️ | 地形姿态/Risk/换挡未做；弯道曲率有局限；MPC 巡航速度偏低 |
 | RViz 可视化 | `config/fastlio.rviz` | — | ✅ | 点云 + 机器人 + 路径 + SetGoal |
 | SE2Grid 可视化 | — | — | ❌ | RViz 无自定义 display 插件，看不出高程图/风险图 |
 
@@ -125,7 +125,7 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 | 障碍物避让 | ⚠️ 能识别墙壁并停下（不撞），但目标在墙后时不绕路 |
 
 **主要缺口**（详见 §8）：
-1. 轨迹优化完成 P0（平滑+运动学）与 P1（SDF 避障），但**未并入 planner 主流程** → MPC 仍跟踪 A* 粗路径；地形姿态/Risk/换挡未做
+1. 轨迹优化已接入 planner（P2，异步、失败回退），但地形姿态/Risk/换挡未做；弯道曲率与 MPC 巡航速度仍有局限
 2. 可通行性评估默认关闭 → SDF 只有障碍物二值，没有 slope/curvature 风险
 3. 无全局地图/回环 → 长时间运行 SLAM 会缓慢漂移
 4. 目标在障碍物后方时 A* 不绕路（20m 局部地图限制）
@@ -593,6 +593,20 @@ ros2 run tf2_tools view_frames 2>&1 | grep -oE "base_footprint: .{0,25}"
 | `tol` / `max_iter` | 1e-2 / 200 | IPOPT 容差与迭代上限 |
 | `sample_dt` | 0.1 | 输出采样间隔 (s) |
 
+**planner 侧（`config/planning.yaml`）接入参数：**
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `enable_optimization` | true | 总开关；false 时纯 A*（排障用） |
+| `trajectory_dmin` | 0.28 | 避障间距阈值 (m) |
+| `trajectory_seg_len` | 0.9 | 分段弧长 (m) |
+| `trajectory_sdf_iters` | 5 | outside-in 迭代轮数 |
+| `optimize_min_length` | 2.0 | A* 路径短于此值不优化（短路径分段病态） |
+| `optimize_offtrack_tolerance` | 2.0 | 机器人离优化轨迹超过此距离则失效重算 |
+| `optimize_valid_s` | 8.0 | 优化结果最长有效期 (s) |
+| `optimize_min_remaining` | 0.4 | 裁掉身后点后剩余轨迹短于此值则弃用 |
+| `traj_publish_step` | 0.3 | 发布前弧长重采样间距 (m)，决定 MPC 视界 |
+
 > 求解用 IPOPT + `hessian_approximation=limited-memory`。实测：用精确 Hessian 需 1300ms，
 > 改 L-BFGS 后降到 200~400ms，精度仍满足约束。
 
@@ -757,6 +771,16 @@ cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim/seb_naver_planner
 # 期望: 结果: 6/6 通过
 ```
 
+P2 的 planner 集成测试（异步不阻塞 / 偏离回退 / 开关可关）:
+
+```bash
+cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim/seb_naver_planner
+source /opt/ros/humble/setup.bash
+source /develop/scorpio_mujoco_sim_ws/install/setup.bash   # 需要 se2_grid_msgs
+/usr/bin/python3 test/test_planner_optimization.py
+# 期望: 结果: 3/3 通过
+```
+
 单独调用:
 
 ```python
@@ -858,7 +882,7 @@ pkill -9 -f rviz2
 
 - [x] **轨迹优化 P0**：五次多项式最小 jerk + δ/v/a/κ 约束（5/5 场景，200~400ms）
 - [x] **轨迹优化 P1**：SDF 避障（EDT 距离场 + outside-in 迭代排斥 + 端点过滤 + 输穿墙拒绝），6/6 场景
-- [ ] **轨迹优化 P2**：并入 planner（降频/异步，`Path.header.stamp` 带时间）
+- [x] **轨迹优化 P2**：异步接入 planner（单线程 executor + 结果缓存 + 身后裁剪 + 弧长重采样），失败自动回退 A* 粗路径；集成 3/3、端到端到达
 - [ ] **轨迹优化 P2.5**：分段点改为优化变量（论文 P），根治弯道曲率局限
 - [ ] **轨迹优化 P3**：订阅 `/fused_map` 加地形姿态 φx/φy 约束
 - [ ] **轨迹优化 P4**：启用可通行性后加 Risk 项；可选 s(t)/换挡（论文完整版）
@@ -893,6 +917,13 @@ pkill -9 -f rviz2
 | **排斥跳过起终点** | 起终点位置是边界等式硬约束，推不动；对其施加排斥会导致 `Restoration_Failed` |
 | **输入路径穿墙直接拒绝** | A* 负责避障、优化器负责平滑。强行「拉出来」不可行（`Maximum_Iterations_Exceeded`），应让上游重规划 |
 | **分段策略维持等弧长** | 试过 4 种替代（DP 特征点 / 曲率加权 / 按航向加段 / 增加段数）全部让 κ 恶化到 4.7~553。弯道根治需把分段点变成优化变量（P2.5） |
+| **轨迹优化异步执行** | 求解 0.4~2.5s，同步会阻塞 50Hz FSM 40 个周期（期间不判到达、不响应重规划）。改用单线程 executor，`plan()` 只跑 A*（49ms） |
+| **优化结果按「在轨迹附近」判有效** | 原判据「离优化起点 ≤0.8m」在机器人 0.5m/s 时 1.6s 就失效，实测几乎全 fallback。改为「当前位置到轨迹最近距离 ≤2.0m」 |
+| **发布前裁掉身后轨迹** | 不裁剪会把身后点发给 MPC，MPC 参考落到机器人后方 → 输出负速度「退回」（实测 v 均值 -0.067 m/s 持续倒车） |
+| **发布前按弧长重采样 0.3m** | 优化轨迹是 0.1s 等时间采样（点距 ~4cm），MPC 取 N=20 点视界只有 0.8m，跟踪极慢。重采样到 0.3m 后视界 6m |
+| **短路径（<2m）不优化** | N 被压到 3 段、段长 <0.7m，五次多项式病态，实测 17/19 被拒 |
+| **MPC `U_ref` 给巡航速度** | 原固定 0 + `R=10` 等于惩罚速度本身，实测巡航 0.145 m/s（上限 0.5）。改为按剩余距离给 `sqrt(2·0.8·d)`，`R` 降到 3.0 |
+| **κ 评估跳过 <1cm 边** | 低速段相邻采样点几乎重合，Menger 曲率 `2cross/(abc)` 被噪声放大到 κ=887，导致合格轨迹被判超限 |
 
 ---
 

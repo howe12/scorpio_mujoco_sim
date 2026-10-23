@@ -29,6 +29,19 @@ seb_naver_planner:
     # 重规划间隔: 0.5→1.0s (减少路径频繁变化, 转弯更稳定)
     replan_interval: 1.0
 
+    # ---- 轨迹优化 (P2: 异步接入, 求解 0.4~2.5s 不阻塞 50Hz FSM) ----
+    enable_optimization: true
+    trajectory_dmin: 0.28          # 避障间距阈值 (m) = 车半宽 0.211 + 余量
+    trajectory_seg_len: 0.9        # 分段弧长 (m)，越小越稳但越慢
+    trajectory_max_accel: 1.0      # m/s²
+    trajectory_sdf_iters: 5        # outside-in 迭代轮数
+    # 优化结果有效性: 起点须在此距离内, 且不超过 optimize_valid_s 秒
+    optimize_offtrack_tolerance: 2.0  # 机器人离优化轨迹超过此距离则失效
+    optimize_valid_s: 8.0
+    optimize_min_length: 2.0       # 路径短于此值不优化（短路径分段病态，几乎必被拒）
+    traj_publish_step: 0.3         # 优化轨迹发布前的弧长重采样间距 (m)，决定 MPC 视界
+    optimize_min_remaining: 0.4    # 裁掉身后点后剩余轨迹短于此值则弃用
+
 mpc_controller:
   ros__parameters:
     wheel_base: 0.315
@@ -40,6 +53,6 @@ mpc_controller:
     # 位置权重 (x,y) 高, 航向权重 Q[2] 需足够大才能平滑转弯.
     # Q[2]=0.5 太低 → MPC 几乎忽略航向误差 → 大半径弧线/过冲 → 转弯差
     Q: [10.0, 10.0, 2.0]
-    R: [10.0, 10.0]
+    R: [3.0, 3.0]
     # 转向变化率惩罚压低, 转弯更灵活 (原 10 过硬, 转弯僵直)
     Rd: [5.0, 3.0]

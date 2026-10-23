@@ -856,7 +856,10 @@ class TrajectoryOptimizer:
             a = math.dist(p1, p2)
             b = math.dist(p0, p2)
             c = math.dist(p0, p1)
-            if min(a, b, c) < 1e-9:
+            # 边长过小时 Menger 曲率 = 2·cross/(abc) 会被数值噪声放大：
+            # 低速段相邻采样点几乎重合，实测会算出 κ=887 这种假值，
+            # 导致本来合格的轨迹被验收判为「曲率超限」。1cm 以下不予评估。
+            if min(a, b, c) < 0.01:
                 continue
             cross = abs((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1]))
             max_kappa = max(max_kappa, 2.0 * cross / (a * b * c))

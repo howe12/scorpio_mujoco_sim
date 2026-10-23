@@ -19,9 +19,11 @@ Publishes:
 from __future__ import annotations
 
 import math
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from enum import Enum, auto
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import rclpy
@@ -34,6 +36,11 @@ from std_msgs.msg import String, Header, Float32MultiArray, MultiArrayDimension
 from se2_grid_msgs.msg import SE2Grid
 
 from seb_naver_planner.kino_astar import KinoAStarPlanner, SearchStatus
+
+try:
+    from seb_naver_planner.trajectory_optimizer import TrajectoryOptimizer
+except ImportError:  # CasADi 缺失时降级为「只用 A*」
+    TrajectoryOptimizer = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +171,18 @@ class SDFGridParser:
 # PlanManager
 # ---------------------------------------------------------------------------
 class PlanManager:
-    """Manages the planning pipeline: A* search → (future: PHR-ALM) → path output."""
+    """规划流水线：Kinodynamic A* → 轨迹优化（异步）→ 输出。
+
+    轨迹优化的单次求解耗时 0.4~2.5s（IPOPT，N≤10 段），而 FSM 定时器是 50Hz。
+    同步调用会阻塞 FSM 整整 0.4~2.5s（期间不判到达、不响应重规划），因此优化放在
+    单线程 executor 里**异步**执行：
+
+      - ``plan()`` 只做 A*（毫秒级）并立即返回；
+      - 若当前有可用的优化结果（起点接近、未过期），返回优化轨迹，否则返回 A* 粗路径；
+      - 优化任务在后台完成后才替换结果，失败则丢弃（继续用 A* 粗路径）。
+
+    这样最坏情况只是「晚一次重规划才用上优化轨迹」，不会卡住 FSM。
+    """
 
     def __init__(self, node: Node, sdf_parser: SDFGridParser) -> None:
         self._node = node
@@ -185,6 +203,65 @@ class PlanManager:
             'step_arc': self.step_arc,
             'steer_res': self.steer_res,
         })
+
+        # ---- 轨迹优化（P2：异步接入）----
+        self.enable_optimization: bool = node.get_parameter("enable_optimization").value
+        # 有效性判据：机器人当前位置到优化轨迹的最近距离。
+        # 不用「离优化起点多远」——机器人每秒移动 0.5m，1s 后就超过 0.8m，
+        # 优化结果会不断失效（实测几乎全部 fallback）。
+        self.optimize_offtrack_tolerance: float = node.get_parameter(
+            "optimize_offtrack_tolerance").value
+        self.optimize_valid_s: float = node.get_parameter("optimize_valid_s").value
+
+        self._optimizer = None
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._opt_future: Optional[Future] = None
+        self._opt_lock = threading.Lock()
+        self._opt_samples: Optional[List[Tuple[float, float, float, float]]] = None
+        self._opt_start: Optional[Tuple[float, float]] = None
+        self._opt_time: float = 0.0
+        self._opt_ok: int = 0
+        self._opt_fail: int = 0
+        self._opt_skip_short: int = 0
+        # 过短的路径不优化：N 会被压到 3 段、段长 <0.7m，五次多项式病态，
+        # 优化结果几乎必然 κ 超限（实测短路径场景 17/19 被拒）。
+        self.min_optimize_length: float = node.get_parameter(
+            "optimize_min_length").value
+        # 优化轨迹按时间等间隔采样（0.1s），点间距只有几厘米；
+        # MPC 用「最近点 + N 个点」取参考，视界会被压到 20×0.04≈0.8m，
+        # 导致跟踪极慢、转弯提前量不足。发布前按弧长重采样到 0.3m。
+        self.traj_publish_step: float = node.get_parameter("traj_publish_step").value
+        # 剩余轨迹短于此值则视为不可用，等待下一次优化
+        self.optimize_min_remaining: float = node.get_parameter(
+            "optimize_min_remaining").value
+
+        #: 最近一次 A* 粗路径 [(x, y, yaw)]，供发布 /planner/rough_path
+        self.last_rough: List[Tuple[float, float, float]] = []
+        #: 最近一次实际交给 MPC 的轨迹（优化结果或粗路径）
+        self.last_traj: List[Tuple[float, float, float]] = []
+
+        if self.enable_optimization and TrajectoryOptimizer is not None:
+            try:
+                self._optimizer = TrajectoryOptimizer({
+                    "wheel_base": self.wheel_base,
+                    "max_speed": self.max_speed,
+                    "max_accel": node.get_parameter("trajectory_max_accel").value,
+                    "max_steer": self.max_steer,
+                    "seg_len": node.get_parameter("trajectory_seg_len").value,
+                    "dmin": node.get_parameter("trajectory_dmin").value,
+                    "sdf_iters": node.get_parameter("trajectory_sdf_iters").value,
+                })
+                self._executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="traj_opt")
+                node.get_logger().info(
+                    "TrajectoryOptimizer enabled (async, dmin="
+                    f"{node.get_parameter('trajectory_dmin').value}m)")
+            except Exception as exc:
+                self._optimizer = None
+                node.get_logger().warn(f"TrajectoryOptimizer disabled: {exc}")
+        elif self.enable_optimization:
+            node.get_logger().warn(
+                "TrajectoryOptimizer unavailable (CasADi missing) → A* only")
 
     def plan(
         self,
@@ -226,11 +303,155 @@ class PlanManager:
             return None
 
         # Convert path format: list of (x, y, theta, singular) → list of (x, y, yaw)
-        waypoints = [(p[0], p[1], p[2]) for p in path]
+        rough = [(float(p[0]), float(p[1]), float(p[2])) for p in path]
+        self.last_rough = rough
 
-        # Step 4: Skip PHR-ALM optimization for now — use rough path directly
-        # TODO: Implement PHR-ALM trajectory optimization
-        return waypoints
+        # ---- 异步触发轨迹优化（不阻塞本次规划）----
+        if self._optimizer is not None:
+            plen = 0.0
+            for i in range(1, len(rough)):
+                plen += math.dist(rough[i - 1][:2], rough[i][:2])
+            if plen < self.min_optimize_length:
+                self._opt_skip_short += 1
+            elif self._fresh_optimized(start_x, start_y) is None:
+                # 仅在「没有可用优化轨迹」时才提交新任务：
+                # 每 1s 重规划都提交会让 executor 一直忙、结果还没用上就过期
+                self._maybe_submit_optimization(
+                    path, self._sdf.sdf_map, sdf_info, start_vel, start_x, start_y)
+
+        # ---- 选择本次交给 MPC 的轨迹 ----
+        optimized = self._fresh_optimized(start_x, start_y)
+        traj = optimized if optimized is not None else rough
+        self.last_traj = traj
+        return traj
+
+    # ------------------------------------------------------------------
+    # 轨迹优化（异步）
+    # ------------------------------------------------------------------
+
+    def _maybe_submit_optimization(
+        self,
+        astar_path: list,
+        sdf_grid,
+        sdf_info: Dict,
+        start_vel: float,
+        start_x: float,
+        start_y: float,
+    ) -> None:
+        """若上一个优化任务已完成则提交新任务。"""
+        if self._executor is None:
+            return
+        if self._opt_future is not None and not self._opt_future.done():
+            return  # 上一次还在算，跳过本次（越级提交只会堆积）
+        self._opt_future = self._executor.submit(
+            self._optimize_worker,
+            list(astar_path), sdf_grid, dict(sdf_info), float(start_vel),
+            float(start_x), float(start_y),
+        )
+
+    def _optimize_worker(
+        self,
+        astar_path: list,
+        sdf_grid,
+        sdf_info: Dict,
+        start_vel: float,
+        start_x: float,
+        start_y: float,
+    ) -> None:
+        """executor 线程内运行：求解并原子替换结果。"""
+        try:
+            res = self._optimizer.optimize(
+                astar_path,
+                start_vel=start_vel,
+                sdf_grid=sdf_grid,
+                sdf_info=sdf_info,
+            )
+        except Exception as exc:
+            with self._opt_lock:
+                self._opt_fail += 1
+            self._node.get_logger().warn(f"traj opt exception: {exc}")
+            return
+
+        with self._opt_lock:
+            if res.success and res.samples:
+                self._opt_samples = list(res.samples)
+                self._opt_start = (start_x, start_y)
+                self._opt_time = time.time()
+                self._opt_ok += 1
+            else:
+                # 失败即让旧结果失效，避免继续用不安全/过期的轨迹
+                self._opt_samples = None
+                self._opt_start = None
+                self._opt_fail += 1
+
+        if res.success:
+            self._node.get_logger().info(
+                f"traj opt ok: Tf={res.duration:.1f}s "
+                f"min_clr={res.min_clearance:.2f}m "
+                f"k={res.max_kappa:.2f} {res.solve_time_ms:.0f}ms "
+                f"(ok/fail={self._opt_ok}/{self._opt_fail})"
+            )
+        else:
+            opt = self._optimizer
+            self._node.get_logger().warn(
+                f"traj opt rejected: v={res.max_speed:.2f}/{opt.max_speed:.2f} "
+                f"k={res.max_kappa:.2f}/{opt.kappa_limit:.2f} "
+                f"| {res.status[:60]} (ok/fail={self._opt_ok}/{self._opt_fail}) "
+                "→ 用 A* 粗路径")
+
+    def _fresh_optimized(
+        self, start_x: float, start_y: float
+    ) -> Optional[List[Tuple[float, float, float]]]:
+        """取可用的优化轨迹：起点接近且未过期，否则 None。"""
+        with self._opt_lock:
+            samples = self._opt_samples
+            opt_start = self._opt_start
+            opt_time = self._opt_time
+
+        if not samples:
+            return None
+        if time.time() - opt_time > self.optimize_valid_s:
+            return None
+        # 机器人必须仍在轨迹附近（横向偏离小），否则说明轨迹已不适用
+        dists = [math.dist((start_x, start_y), (sx, sy)) for sx, sy, _th, _t in samples]
+        idx_min = min(range(len(dists)), key=lambda i: dists[i])
+        if dists[idx_min] > self.optimize_offtrack_tolerance:
+            return None
+
+        # 裁掉机器人身后（已走过）的轨迹段。
+        # 不裁剪会把身后的点也发给 MPC：MPC 的参考点可能落在机器人后方，
+        # 于是输出负速度试图「退回」轨迹起点（实测 v 均值 -0.067 m/s，一直在倒车）。
+        pts = [(float(x), float(y), float(th))
+               for x, y, th, _t in samples[idx_min:]]
+        if len(pts) < 2:
+            return None
+
+        # 剩余轨迹太短时不要用（会让 MPC 视界枯竭、反复外推）
+        remaining = sum(
+            math.dist(pts[i - 1][:2], pts[i][:2]) for i in range(1, len(pts))
+        )
+        if remaining < self.optimize_min_remaining:
+            return None
+
+        return self._resample_by_arc(pts, self.traj_publish_step)
+
+    @staticmethod
+    def _resample_by_arc(
+        pts: List[Tuple[float, float, float]], step: float
+    ) -> List[Tuple[float, float, float]]:
+        """按固定弧长间隔重采样（保留首末点）。"""
+        if len(pts) < 3 or step <= 0.0:
+            return pts
+        out = [pts[0]]
+        acc = 0.0
+        for i in range(1, len(pts)):
+            acc += math.dist(pts[i - 1][:2], pts[i][:2])
+            if acc >= step:
+                out.append(pts[i])
+                acc = 0.0
+        if out[-1] is not pts[-1]:
+            out.append(pts[-1])
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +473,18 @@ class SebNaverPlannerNode(Node):
         self.declare_parameter("goal_tolerance_yaw", 0.15)
         self.declare_parameter("goal_tolerance_vel", 0.05)
         self.declare_parameter("replan_interval", 0.5)
+        # ---- 轨迹优化（P2）----
+        self.declare_parameter("enable_optimization", True)
+        self.declare_parameter("trajectory_dmin", 0.28)
+        self.declare_parameter("trajectory_seg_len", 0.9)
+        self.declare_parameter("trajectory_max_accel", 1.0)
+        self.declare_parameter("trajectory_sdf_iters", 5)
+        # 优化结果的有效性：起点须接近、结果须新鲜
+        self.declare_parameter("optimize_offtrack_tolerance", 0.8)
+        self.declare_parameter("optimize_valid_s", 4.0)
+        self.declare_parameter("optimize_min_length", 2.0)
+        self.declare_parameter("traj_publish_step", 0.3)
+        self.declare_parameter("optimize_min_remaining", 1.5)
 
         # Cache tolerances
         self._tol_dist: float = self.get_parameter("goal_tolerance_dist").value
@@ -427,13 +660,16 @@ class SebNaverPlannerNode(Node):
         if path is None:
             return None
 
-        # Publish rough path (same as optimized for now)
-        self._publish_path(path, self._rough_path_pub, "map")
-
-        # Publish trajectory for MPC (currently identical to rough path)
+        # A* 粗路径（可视化 / 调试）
+        if self._plan_manager.last_rough:
+            self._publish_path(self._plan_manager.last_rough, self._rough_path_pub, "map")
+        # 交给 MPC 的轨迹（优化结果，或回退的 A* 粗路径）
+        optimized = path is not self._plan_manager.last_rough
         self._publish_path(path, self._traj_pub, "map")
 
-        self.get_logger().info(f"Planning pipeline succeeded: {len(path)} waypoints")
+        self.get_logger().info(
+            f"Planning pipeline: rough={len(self._plan_manager.last_rough)} pts, "
+            f"traj={len(path)} pts ({'optimized' if optimized else 'A* fallback'})")
         return path
 
     # ------------------------------------------------------------------

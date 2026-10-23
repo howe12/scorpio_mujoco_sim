@@ -259,7 +259,17 @@ class MPCController(Node):
         # Set parameter values
         opti.set_value(self.x0_param, state)
         opti.set_value(self.X_ref_param, X_ref)
-        opti.set_value(self.U_ref_param, np.zeros((self.N, 2)))
+
+        # 速度参考: 原来固定为 0，配合 R=10 等于「惩罚速度本身」，
+        # MPC 因此强烈倾向停车 —— 实测巡航只有 0.145 m/s（上限 0.5）。
+        # 这里按到参考终点的剩余距离给巡航速度，并做末端减速。
+        u_ref = np.zeros((self.N, 2))
+        dist_end = float(np.linalg.norm(state[:2] - X_ref[-1, :2]))
+        # v <= sqrt(2·a·d)，取 a=0.8 m/s² 保守减速
+        v_cruise = min(self.max_speed, math.sqrt(2.0 * 0.8 * max(dist_end, 0.0)))
+        v_cruise = max(v_cruise, 0.0)
+        u_ref[:, 0] = v_cruise
+        opti.set_value(self.U_ref_param, u_ref)
 
         # Previous control for rate penalty
         if self.prev_u is not None:
