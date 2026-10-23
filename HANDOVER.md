@@ -108,8 +108,8 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 | Kinodynamic A* | `seb_naver_planner/kino_astar.py` | ~670 行 | ✅ | 自行车运动学 + Reeds-Shepp + SDF 碰撞 |
 | ReplanFSM | `seb_naver_planner/planner_node.py` | ~530 行 | ✅ | 5 状态机 + 到达判定 + 定时重规划 |
 | MPC 控制器 | `seb_naver_planner/mpc_node.py` | ~380 行 | ⚠️ | CasADi SQP，偶发迭代超限（有 fallback） |
-| 轨迹优化 (P0+P1+P2) | `trajectory_optimizer.py` + `planner_node.py` | ~1100 行 | ✅ | 五次多项式最小 jerk + SDF 避障 + **异步接入 planner**；P0 5/5、P1 6/6、P2 集成 3/3、端到端到达 |
-| PHR-ALM 完整版 (P2.5-P4) | 同上 | — | ⚠️ | 地形姿态/Risk/换挡未做；弯道曲率有局限；MPC 巡航速度偏低 |
+| 轨迹优化 (P0~P2.5) | `trajectory_optimizer.py` + `planner_node.py` | ~1250 行 | ✅ | 五次多项式最小 jerk + SDF 避障 + 异步接入 + **A* 车体膨胀**；P0 5/5、P1 6/6、P2 3/3、端到端到达 |
+| PHR-ALM 完整版 (P3-P4) | 同上 | — | ⚠️ | 地形姿态/Risk/换挡未做；MPC 巡航速度偏低 |
 | RViz 可视化 | `config/fastlio.rviz` | — | ✅ | 点云 + 机器人 + 路径 + SetGoal |
 | SE2Grid 可视化 | — | — | ❌ | RViz 无自定义 display 插件，看不出高程图/风险图 |
 
@@ -606,6 +606,9 @@ ros2 run tf2_tools view_frames 2>&1 | grep -oE "base_footprint: .{0,25}"
 | `optimize_valid_s` | 8.0 | 优化结果最长有效期 (s) |
 | `optimize_min_remaining` | 0.4 | 裁掉身后点后剩余轨迹短于此值则弃用 |
 | `traj_publish_step` | 0.3 | 发布前弧长重采样间距 (m)，决定 MPC 视界 |
+| `inflation_radius` | 0.25 | **A* 障碍物膨胀半径 (m)**，按车体半宽 0.211 + 余量 |
+| `follow_mode` | hard | hard: 分段点硬约束（推荐）；soft: 节点变优化变量；auto: 有 SDF 走 soft |
+| `node_motion_margin` | 0.60 | soft 模式下节点相对 A* 点的最大偏移 (m) |
 
 > 求解用 IPOPT + `hessian_approximation=limited-memory`。实测：用精确 Hessian 需 1300ms，
 > 改 L-BFGS 后降到 200~400ms，精度仍满足约束。
@@ -809,7 +812,7 @@ else:
 | 导航方向反 / 偏转 | 初始朝向非 0° → 坐标系偏差 | 已修复 (`reset_robot_facing_goal` 设 yaw=0) |
 | 机器人不动 | `terrain_analyzer` 未启动 → 无 SDF → planner 等待 | `ros2 topic list \| grep sdf_map` |
 | MPC solver failed | 短程转弯 SQP 迭代超限 | 已有 fallback (沿用上次控制衰减) |
-| 撞墙 | **A* 碰撞检测采样间隔 0.33m 跨过薄墙**（wall_low_1 仅 0.2m 厚）；SDF 无障碍物是次级原因 | 已修复：① terrain_analyzer 高点统计标记 occupied ② **A* 采样改为 1 个栅格 (0.1m)**，见 §9 |
+| 撞墙 | **两个叠加根因**：① A* 碰撞采样 0.33m 跨过 0.2m 薄墙；② **A* 不看车体尺寸**，路径线段最小间距实测 0.157m < 车半宽 0.211m → 车身蹭墙 | 已修复：① 采样改为 1 栅格 (0.1m)；② `inflation_radius=0.25` 膨胀障碍物（实测间距 0.157→0.335m）；③ terrain_analyzer 高点统计标记 occupied |
 | 目标在墙后不动 | A* 20m 局部地图内找不到绕路 | 已知局限 (§8.1)，改发可绕行目标 |
 | `No Effective Points` 持续 | `det_range` 太大 (默认 300) 清空地图 | 已修复 (det_range=40) |
 | 转弯时速度爆炸 70+ m/s | timestep > 0.002 数值发散 | 已修复 (timestep=0.001) |
@@ -883,7 +886,7 @@ pkill -9 -f rviz2
 - [x] **轨迹优化 P0**：五次多项式最小 jerk + δ/v/a/κ 约束（5/5 场景，200~400ms）
 - [x] **轨迹优化 P1**：SDF 避障（EDT 距离场 + outside-in 迭代排斥 + 端点过滤 + 输穿墙拒绝），6/6 场景
 - [x] **轨迹优化 P2**：异步接入 planner（单线程 executor + 结果缓存 + 身后裁剪 + 弧长重采样），失败自动回退 A* 粗路径；集成 3/3、端到端到达
-- [ ] **轨迹优化 P2.5**：分段点改为优化变量（论文 P），根治弯道曲率局限
+- [x] **轨迹优化 P2.5**：① `follow_mode` 默认 hard（软引导是 κ 尖峰的真凶）② free nodes 分段点变优化变量 ③ **A* 车体膨胀 `inflation_radius=0.25`**（路径间距 0.157→0.335m）
 - [ ] **轨迹优化 P3**：订阅 `/fused_map` 加地形姿态 φx/φy 约束
 - [ ] **轨迹优化 P4**：启用可通行性后加 Risk 项；可选 s(t)/换挡（论文完整版）
 - [ ] 用 OpenMP/向量化加速 `computeTraversability()` 并重新启用（恢复坡度/曲率风险）
@@ -924,6 +927,10 @@ pkill -9 -f rviz2
 | **短路径（<2m）不优化** | N 被压到 3 段、段长 <0.7m，五次多项式病态，实测 17/19 被拒 |
 | **MPC `U_ref` 给巡航速度** | 原固定 0 + `R=10` 等于惩罚速度本身，实测巡航 0.145 m/s（上限 0.5）。改为按剩余距离给 `sqrt(2·0.8·d)`，`R` 降到 3.0 |
 | **κ 评估跳过 <1cm 边** | 低速段相邻采样点几乎重合，Menger 曲率 `2cross/(abc)` 被噪声放大到 κ=887，导致合格轨迹被判超限 |
+| **`follow_mode` 默认 hard（不用软引导）** | 软引导让几何为 jerk 最优而切角，同一条 A* 弯道路径实测 κ=5.3~44；改硬约束后 κ=1.26。A* 已避障，优化器只需平滑 |
+| **free nodes 的 C 连续从 1 阶起** | 节点等式已承担位置连续性；再叠加 order=0 的 C⁴ 约束会线性相关 → `Restoration_Failed` |
+| **排斥 push 限幅 0.35m** | 障碍内部时 `(dmin-c)` 可达 0.5m，1.5 倍放大后目标点跳太远 + 大权重 → `Error_In_Step_Computation` |
+| **A* 前膨胀障碍物** | A* 只看格子占用、不看车体尺寸，路径线段间距实测仅 0.157m（车半宽 0.211m）→ 车身蹭墙。膨胀 0.25m 后 0.335m |
 
 ---
 

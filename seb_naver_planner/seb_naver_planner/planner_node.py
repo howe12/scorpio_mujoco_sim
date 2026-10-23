@@ -231,6 +231,10 @@ class PlanManager:
         # MPC 用「最近点 + N 个点」取参考，视界会被压到 20×0.04≈0.8m，
         # 导致跟踪极慢、转弯提前量不足。发布前按弧长重采样到 0.3m。
         self.traj_publish_step: float = node.get_parameter("traj_publish_step").value
+        # 车体膨胀半径：A* 的碰撞检测只看格子占用，不考虑车体尺寸，
+        # 实测规划出的路径线段最小间距只有 0.157m，而车体半宽 0.211m —— 车身会蹭墙。
+        # 把障碍物按此半径膨胀后再给 A*，路径才会真正留出车宽。
+        self.inflation_radius: float = node.get_parameter("inflation_radius").value
         # 剩余轨迹短于此值则视为不可用，等待下一次优化
         self.optimize_min_remaining: float = node.get_parameter(
             "optimize_min_remaining").value
@@ -291,10 +295,11 @@ class PlanManager:
             'width': self._sdf.sdf_map.shape[1] if self._sdf.sdf_map is not None else 0,
             'height': self._sdf.sdf_map.shape[0] if self._sdf.sdf_map is not None else 0,
         }
+        grid_for_astar = self._inflate_sdf(self._sdf.sdf_map)
         status, path = self._kino_astar.search(
             start_state=(start_x, start_y, start_yaw),
             goal_state=(goal_x, goal_y, goal_yaw),
-            sdf_grid_data=self._sdf.sdf_map,
+            sdf_grid_data=grid_for_astar,
             sdf_info=sdf_info,
         )
 
@@ -324,6 +329,26 @@ class PlanManager:
         traj = optimized if optimized is not None else rough
         self.last_traj = traj
         return traj
+
+    def _inflate_sdf(self, grid: np.ndarray) -> np.ndarray:
+        """按车体半径膨胀障碍物（返回新的栅格，不修改输入）。"""
+        if self.inflation_radius <= 0.0:
+            return grid
+        try:
+            from scipy.ndimage import binary_dilation
+        except ImportError:
+            return grid
+        res = self._sdf.resolution
+        iters = int(math.ceil(self.inflation_radius / max(res, 1e-6)))
+        if iters <= 0:
+            return grid
+        occupied = np.asarray(grid) < 0.0
+        if not occupied.any():
+            return grid
+        inflated = binary_dilation(occupied, iterations=iters)
+        out = np.array(grid, copy=True)
+        out[inflated] = -1.0
+        return out
 
     # ------------------------------------------------------------------
     # 轨迹优化（异步）
@@ -485,6 +510,7 @@ class SebNaverPlannerNode(Node):
         self.declare_parameter("optimize_min_length", 2.0)
         self.declare_parameter("traj_publish_step", 0.3)
         self.declare_parameter("optimize_min_remaining", 1.5)
+        self.declare_parameter("inflation_radius", 0.25)
 
         # Cache tolerances
         self._tol_dist: float = self.get_parameter("goal_tolerance_dist").value

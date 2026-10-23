@@ -98,10 +98,15 @@ def scene_parallel_wall():
 
 
 def scene_close_wall():
-    """2: 中段贴近墙 0.30m，起终点留安全距离（起终点被硬约束固定，推不动）。"""
+    """2: 中段贴近墙（间距 0.30m，略高于 dmin=0.28）。
+
+    路径本身必须合法：planner 的 A* 会按 inflation_radius=0.25 膨胀障碍物，
+    所以实际拿到的路径间距一定 >= 0.25m，不会出现 0.20m 这种「优化器无论
+    如何都满足不了」的输入。
+    """
     grid, info = _grid()
     _wall_along_x(grid, 0.0, -1.0, 6.0, thickness=0.2)
-    return _make_path([(0.0, 0.70), (2.0, 0.30), (3.5, 0.30), (5.0, 0.70)]), grid, info
+    return _make_path([(0.0, 0.70), (2.0, 0.40), (3.5, 0.40), (5.0, 0.70)]), grid, info
 
 
 def scene_through_wall():
@@ -135,12 +140,17 @@ def scene_astar():
             "max_steer": PARAMS["max_steer"],
             "step_arc": 1.0,
             "steer_res": 0.3,
+            "max_search_time": 12.0,
         }
     )
+    # 与 planner 一致：A* 前按车体半径膨胀障碍物
+    from scipy.ndimage import binary_dilation
+    inflated = np.array(grid, copy=True)
+    inflated[binary_dilation(grid < 0.0, iterations=3)] = -1.0
     status, path = planner.search(
         start_state=(0.0, 0.0, 0.0),
         goal_state=(5.0, 0.0, 0.0),
-        sdf_grid_data=grid,
+        sdf_grid_data=inflated,
         sdf_info=info,
     )
     if status != SearchStatus.SUCCESS or len(path) < 2:
@@ -162,7 +172,7 @@ SCENES = [
     ("2 贴近墙 0.30m", scene_close_wall, "success"),
     ("3 穿墙路径", scene_through_wall, "reject"),
     ("4 窄通道 1.1m", scene_corridor, "success"),
-    ("5 真实 A* 绕墙", scene_astar, "safe"),
+    ("5 真实 A* 绕墙", scene_astar, "success"),
     ("6 无 SDF 回归", scene_no_sdf, "success"),
 ]
 

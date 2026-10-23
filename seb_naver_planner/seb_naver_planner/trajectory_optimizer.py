@@ -121,6 +121,9 @@ class TrajectoryOptimizer:
         self.dp_eps: float = float(p.get("dp_eps", 0.08))
         # 曲率加权强度：弯道段长相对直线段的压缩比
         self.curvature_weight: float = float(p.get("curvature_weight", 3.0))
+        # 自由节点相对 A* 路径点的最大偏移 (m)。太大等于放弃 A* 的形状，
+        # 太小则节点无法把折角拉开（P2.5 的意义就在这个盒子内）。
+        self.node_motion_margin: float = float(p.get("node_motion_margin", 0.60))
 
         self.rho_t: float = float(p.get("rho_t", self.DEFAULT_RHO_T))
         # 曲率使用裕度：优化到 0.85·κmax，给 MPC 跟踪留余量
@@ -137,7 +140,11 @@ class TrajectoryOptimizer:
         # 是否把分段点作为硬约束经过（P0 默认 True，保证跟住 A* 的几何）
         # 分段点约束模式: auto | hard | soft | none
         #   auto: 无 SDF → hard（跟住 A* 几何）; 有 SDF → soft（让几何为避障让路）
-        self.follow_mode: str = str(p.get("follow_mode", "auto"))
+        # 默认 hard：始终跟随 A* 的分段点。
+        # 理由：A* 已保证避障（输入穿墙会被直接拒绝），优化器的职责是「平滑且
+        # 不破坏这条几何」。P1 曾把有 SDF 的情况改成软引导，结果几何为了 jerk
+        # 最优而切角，弯道处 κ 冲到 5.3~44（实测）；同一路径改用硬约束后 κ=1.26。
+        self.follow_mode: str = str(p.get("follow_mode", "hard"))
         self._follow_mode_opt = p.get("follow_path", None)  # 兼容旧参数
         # _solve 在未显式传入 follow_hard 时的默认行为
         self.follow_path: bool = bool(
@@ -162,7 +169,7 @@ class TrajectoryOptimizer:
         self._last_warning: str = ""
         # outside-in 迭代次数与排斥代价权重
         self.sdf_iters: int = int(p.get("sdf_iters", 5))
-        self.sdf_repulsion_weight: float = float(p.get("sdf_repulsion_weight", 60.0))
+        self.sdf_repulsion_weight: float = float(p.get("sdf_repulsion_weight", 20.0))
         # 最终验收容差（间距允许比 dmin 小这么多仍判成功）
         self.sdf_tolerance: float = float(p.get("sdf_tolerance", 0.05))
 
@@ -231,11 +238,12 @@ class TrajectoryOptimizer:
                     min_clearance=path_clr,
                 )
 
-        # 有障碍物时允许几何偏离 A*（避免「分段点钉死在障碍旁」导致不可行）
-        if clearing is not None:
-            follow_hard = False if self.follow_mode == "auto" else self.follow_path
+        # auto: 有 SDF 时软引导、无 SDF 时硬约束（保留给实验）；
+        # hard/soft: 显式指定。默认 hard，见 __init__ 的说明。
+        if self.follow_mode == "auto":
+            follow_hard = clearing is None
         else:
-            follow_hard = True if self.follow_mode == "auto" else self.follow_path
+            follow_hard = self.follow_mode == "hard"
 
         # ---- outside-in 迭代: 无约束解 → 找违反点 → 加排斥 → 重解 ----
         # 硬约束（分段点等式）在尖角路径上不可行：例如 0.6m 段内要转 90°，
@@ -579,7 +587,9 @@ class TrajectoryOptimizer:
             n = math.hypot(gx, gy)
             if n < 1e-6:
                 continue
-            push = (self.dmin - c) * 1.5 + 0.10     # 推到阈值外并留余量
+            # 限幅：障碍内部时 (dmin-c) 可能达 0.5m，1.5 倍放大后目标点跳太远，
+            # 加上大权重会让 NLP 的梯度爆炸（实测 Error_In_Step_Computation）
+            push = min((self.dmin - c) * 1.5 + 0.10, 0.35)
             out.append(
                 {
                     "s": t / tf,                     # 归一化时间，与 Tf 变化解耦
@@ -653,9 +663,18 @@ class TrajectoryOptimizer:
         cost += self.rho_t * tf
 
         # 路径跟随 / 避障几何。
-        # follow_hard=True 时把分段点作为等式约束硬性经过（保证跟住 A* 几何）；
-        # 否则用软引导，让几何有自由度避开障碍（配合下面的排斥项）。
+        #
+        # 两种模式：
+        #  hard: 分段点作为等式约束硬性经过 → 尖角路径不可行（0.6m 内转 90° 需
+        #        半径 0.3m < 车极限 0.315m，实测 Restoration_Failed）；
+        #  free: 分段点本身是**优化变量**（论文 Eq.22 的 P），多项式系数被约束到
+        #        节点上，节点受软引导 + 曲率约束 + SDF 排斥共同决定。
+        #        P2.5 之前这里是「对固定的 wps[i+1] 加软代价」，几何自由度实际上
+        #        被软代价的方向钉死，弯道处仍会顶出 κ 尖峰；节点成为独立变量后
+        #        优化器可以真正把折角"拉开"成可行圆弧。
         use_hard = self.follow_path if follow_hard is None else follow_hard
+        node_x: Optional[List] = None
+        node_y: Optional[List] = None
         if use_hard:
             for i in range(n):
                 opti.subject_to(
@@ -665,11 +684,35 @@ class TrajectoryOptimizer:
                     ca.dot(cy[i], self._beta(tp, 0)) == float(wps[i + 1, 1])
                 )
         else:
-            w_pg = self.path_guidance if violations is not None else self.path_guidance_no_sdf
+            # 节点 i (i=0..n-1) = 第 i 段末端 = 第 i+1 段起点。
+            # 位置连续性由这两条等式承担，下面的 C⁴ 循环从 1 阶开始，
+            # 否则 order=0 的连续性约束与它们线性相关 → IPOPT Restoration_Failed。
+            node_x = [opti.variable() for _ in range(n)]
+            node_y = [opti.variable() for _ in range(n)]
+            for i in range(n):
+                opti.subject_to(ca.dot(cx[i], self._beta(tp, 0)) == node_x[i])
+                opti.subject_to(ca.dot(cy[i], self._beta(tp, 0)) == node_y[i])
+            for i in range(n - 1):
+                opti.subject_to(ca.dot(cx[i + 1], self._beta(0, 0)) == node_x[i])
+                opti.subject_to(ca.dot(cy[i + 1], self._beta(0, 0)) == node_y[i])
+            # 终点必须落在目标上；起点由边界条件固定
+            opti.subject_to(node_x[-1] == float(wps[-1, 0]))
+            opti.subject_to(node_y[-1] == float(wps[-1, 1]))
+            # 节点活动的盒子：不允许节点跑到 A* 路径的远端之外
+            margin = self.node_motion_margin
+            for i in range(n):
+                opti.subject_to(node_x[i] >= float(wps[i + 1, 0]) - margin)
+                opti.subject_to(node_x[i] <= float(wps[i + 1, 0]) + margin)
+                opti.subject_to(node_y[i] >= float(wps[i + 1, 1]) - margin)
+                opti.subject_to(node_y[i] <= float(wps[i + 1, 1]) + margin)
+            w_pg = (
+                self.path_guidance if violations is not None
+                else self.path_guidance_no_sdf
+            )
             if w_pg > 0.0:
                 for i in range(n):
-                    ex = ca.dot(cx[i], self._beta(tp, 0)) - float(wps[i + 1, 0])
-                    ey = ca.dot(cy[i], self._beta(tp, 0)) - float(wps[i + 1, 1])
+                    ex = node_x[i] - float(wps[i + 1, 0])
+                    ey = node_y[i] - float(wps[i + 1, 1])
                     cost += w_pg * (ex ** 2 + ey ** 2)
 
         # 避障排斥项: 对上一轮解中间距不足的采样点，在其归一化时间处把轨迹
@@ -703,9 +746,10 @@ class TrajectoryOptimizer:
             opti.subject_to(ca.dot(c[-1], self._beta(tp, 0)) == p_end)   # 终点位置
             opti.subject_to(ca.dot(c[-1], self._beta(tp, 1)) == 0.0)     # 终点速度
 
-        # ---- 段间 C⁴ 连续 ----
+        # ---- 段间连续（hard: 0~4 阶全约束；free nodes: 0 阶已由节点等式承担）----
+        _order_start = 0 if use_hard else 1
         for i in range(n - 1):
-            for order in range(5):
+            for order in range(_order_start, 5):
                 for c in (cx, cy):
                     opti.subject_to(
                         ca.dot(c[i], self._beta(tp, order))
@@ -740,12 +784,17 @@ class TrajectoryOptimizer:
                 opti.subject_to(cross ** 2 <= kappa2 * (v2 + eps_v2) ** 3)
 
         # ---- 初值：匀速直线近似 + A* 分段点 ----
+        tp0 = tf_guess / n
         for i in range(n):
             seg_dx = float(wps[i + 1, 0] - wps[i, 0])
             seg_dy = float(wps[i + 1, 1] - wps[i, 1])
-            tp0 = tf_guess / n
             opti.set_initial(cx[i], np.array([wps[i, 0], seg_dx / tp0, 0, 0, 0, 0]))
             opti.set_initial(cy[i], np.array([wps[i, 1], seg_dy / tp0, 0, 0, 0, 0]))
+        # 自由节点初值 = A* 对应的分段点（线性化点）
+        if node_x is not None and node_y is not None:
+            for i in range(n):
+                opti.set_initial(node_x[i], float(wps[i + 1, 0]))
+                opti.set_initial(node_y[i], float(wps[i + 1, 1]))
         opti.set_initial(tf, tf_guess)
 
         opti.solver(

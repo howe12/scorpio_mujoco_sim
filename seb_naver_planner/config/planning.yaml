@@ -41,6 +41,9 @@ seb_naver_planner:
     optimize_min_length: 2.0       # 路径短于此值不优化（短路径分段病态，几乎必被拒）
     traj_publish_step: 0.3         # 优化轨迹发布前的弧长重采样间距 (m)，决定 MPC 视界
     optimize_min_remaining: 0.4    # 裁掉身后点后剩余轨迹短于此值则弃用
+    # A* 的碰撞检测不看车体尺寸，实测路径线段最小间距只有 0.157m（车半宽 0.211m）→
+    # 车身蹭墙。按此半径膨胀障碍物后再给 A*。
+    inflation_radius: 0.25
 
 mpc_controller:
   ros__parameters:

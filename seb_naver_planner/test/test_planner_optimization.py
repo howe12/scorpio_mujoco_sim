@@ -68,6 +68,7 @@ class FakeNode:
         "optimize_min_length": 2.0,
         "traj_publish_step": 0.3,
         "optimize_min_remaining": 1.5,
+        "inflation_radius": 0.25,
     }
 
     def __init__(self):
