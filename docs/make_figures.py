@@ -450,6 +450,232 @@ def fig5_optimization():
     save(fig, "fig5_optimization.png")
 
 
+
+# ---------------------------------------------------------------------------
+# 图 6: 地形姿态映射 F: SE(2) → R × S²+
+# ---------------------------------------------------------------------------
+def fig6_terrain_pose_mapping():
+    fig = plt.figure(figsize=(12.6, 4.8))
+    gs = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.05, 1.2], wspace=0.24,
+                          left=0.04, right=0.98, top=0.76, bottom=0.12)
+
+    # (a) SE(2)
+    ax = fig.add_subplot(gs[0])
+    ax.set_title("SE(2)：3 个自由度", fontsize=10.5, pad=8)
+    ax.set_xlim(-0.3, 2.4); ax.set_ylim(-0.5, 2.0)
+    ax.set_aspect("equal"); ax.axis("off")
+    ax.add_patch(plt.Rectangle((0.9, 0.55), 0.85, 0.42, angle=28,
+                               facecolor="#74b9ff", alpha=0.55, ec="#0984e3", lw=2))
+    ax.annotate("", xy=(1.9, 1.25), xytext=(1.45, 0.95),
+                arrowprops=dict(arrowstyle="-|>", color="#0984e3", lw=2.2))
+    ax.text(1.95, 1.28, "$\\theta$", fontsize=12, color="#0984e3")
+    ax.plot([0.9], [0.55], "o", color="#d63031", ms=8)
+    ax.text(0.60, 0.36, "$(x, y)$", fontsize=10, color="#d63031")
+    ax.text(1.2, 0.02, "$x,\\ y,\\ \\theta$   共 3 个量", fontsize=10.5, ha="center",
+            bbox=dict(boxstyle="round,pad=0.32", fc="#dff9fb", ec="#22a6b3"))
+    ax.text(1.2, 1.74, "平面位姿", fontsize=9, ha="center", color="#636e72")
+
+    # (b) 真实姿态
+    ax = fig.add_subplot(gs[1])
+    ax.set_title("真实姿态属于 SO(3)：多出 z、俯仰、横滚", fontsize=10.5, pad=8)
+    ax.set_xlim(-0.3, 2.4); ax.set_ylim(-0.5, 2.0)
+    ax.set_aspect("equal"); ax.axis("off")
+    ax.add_patch(Polygon([[0.35, 0.55], [1.95, 0.85], [2.15, 1.55], [0.55, 1.25]],
+                         closed=True, facecolor="#00b894", alpha=0.32, ec="#00b894", lw=2))
+    ax.add_patch(plt.Rectangle((0.95, 0.92), 0.7, 0.34, angle=18,
+                               facecolor="#74b9ff", alpha=0.85, ec="#0984e3", lw=2))
+    ax.text(1.2, 0.20, "$x,y,\\theta$  +  $z$ + $\\phi_x$ + $\\phi_y$",
+            fontsize=9.6, ha="center",
+            bbox=dict(boxstyle="round,pad=0.32", fc="#ffeaa7", ec="#fdcb6e"))
+    ax.text(1.2, 1.74, "坡度让车体倾斜", fontsize=9, ha="center", color="#636e72")
+
+    # (c) 映射 F —— 三块纵向排布，互不重叠
+    ax = fig.add_subplot(gs[2])
+    ax.axis("off")
+    ax.set_title("地形姿态映射 $F$", fontsize=10.5, pad=8)
+    ax.text(0.5, 0.95, "输入：高程图 + $(x,y,\\theta)$", ha="center", va="top", fontsize=9.6)
+    ax.text(0.5, 0.80,
+            "$z=f_1(x,y,\\theta)$   高度\n"
+            "$z^b=f_2(x,y,\\theta)$   地形法线",
+            ha="center", va="center", fontsize=9.6, linespacing=1.9,
+            bbox=dict(boxstyle="round,pad=0.32", fc="#dff9fb", ec="#22a6b3"))
+    ax.text(0.5, 0.54,
+            "$y^b=\\dfrac{z^b\\times x_{yaw}}{\\|z^b\\times x_{yaw}\\|}$\n"
+            "$x^b=y^b\\times z^b$",
+            ha="center", va="center", fontsize=10.0, linespacing=2.0,
+            bbox=dict(boxstyle="round,pad=0.32", fc="#fdf6e3", ec="#b2bec3"))
+    ax.text(0.5, 0.17,
+            "输出：$z$ + 完整姿态 $(x^b,y^b,z^b)$\n"
+            "3 个 SE(2) 变量 → 6 个位姿量",
+            ha="center", va="center", fontsize=8.8, linespacing=1.6,
+            bbox=dict(boxstyle="round,pad=0.30", fc="#ffeaa7", ec="#fdcb6e"))
+
+    fig.suptitle("图 6  地形姿态映射：用 SE(2) 的 3 个变量，恢复出倾斜地形上的完整姿态",
+                 fontsize=12.5, y=0.96)
+    save(fig, "fig6_terrain_pose_mapping.png")
+
+
+# ---------------------------------------------------------------------------
+# 图 7: 方差传播（Eq.9）—— 一个点的高度不确定度从哪来
+# ---------------------------------------------------------------------------
+def fig7_variance_propagation():
+    fig, ax = plt.subplots(figsize=(11.6, 4.4))
+    ax.set_xlim(0, 11.6); ax.set_ylim(0, 4.4); ax.axis("off")
+
+    sources = [
+        ("传感器噪声", r"$\Sigma_S$", "激光测距本身\n有毫米级误差", "#74b9ff", 0.6),
+        ("定位误差", r"$\Sigma_R$", "SLAM 的位姿\n有漂移", "#ffeaa7", 3.5),
+        ("外参误差", r"$\Sigma_B$", "雷达装在车上\n的标定误差", "#fab1a0", 6.4),
+    ]
+    for name, sym, desc, col, x in sources:
+        ax.add_patch(FancyBboxPatch((x, 2.55), 2.5, 1.25,
+                                    boxstyle="round,pad=0.07", fc=col, ec="#2d3436", lw=1.2))
+        ax.text(x + 1.25, 3.52, name, ha="center", fontsize=10, weight="bold")
+        ax.text(x + 1.25, 3.15, sym, ha="center", fontsize=12)
+        ax.text(x + 1.25, 2.78, desc, ha="center", fontsize=7.6, color="#2d3436")
+
+    # 箭头汇聚
+    for x in (1.85, 4.75, 7.65):
+        ax.add_patch(FancyArrowPatch((x, 2.50), (5.4, 1.95), arrowstyle="-|>",
+                                     mutation_scale=15, color="#636e72", lw=1.4,
+                                     connectionstyle="arc3,rad=0.12"))
+    ax.text(5.4, 2.22, "雅可比 $J_S, J_R, J_B$ 线性化", ha="center", fontsize=8.6,
+            color="#2d3436", bbox=dict(boxstyle="round,pad=0.22", fc="white", ec="#b2bec3"))
+
+    ax.add_patch(FancyBboxPatch((3.35, 1.10), 4.1, 0.80,
+                                boxstyle="round,pad=0.07", fc="#a29bfe", ec="#2d3436", lw=1.4))
+    ax.text(5.4, 1.50,
+            r"$\sigma_{z_l}^{2}=J_S^{T}\Sigma_S J_S+J_R^{T}\Sigma_R J_R+J_B^{T}\Sigma_B J_B$",
+            ha="center", va="center", fontsize=10.2, color="white", weight="bold")
+
+    ax.add_patch(FancyArrowPatch((5.4, 1.05), (5.4, 0.72), arrowstyle="-|>",
+                                 mutation_scale=15, color="#2d3436", lw=1.5))
+    ax.add_patch(FancyBboxPatch((3.35, 0.22), 4.1, 0.46,
+                                boxstyle="round,pad=0.06", fc="#55efc4", ec="#2d3436", lw=1.2))
+    ax.text(5.4, 0.45, "该点的方差 → 一维 Kalman 融合的权重",
+            ha="center", va="center", fontsize=9.2)
+
+    ax.text(10.55, 2.95, "为什么重要", fontsize=9.5, weight="bold", color="#2d3436")
+    ax.text(10.55, 2.62,
+            "方差大的观测\n权重就小；\n多次观测按\n马氏距离判\n是否为同一格",
+            fontsize=7.6, va="top", color="#2d3436")
+
+    fig.suptitle("图 7  方差传播（Eq.9）：一个地形点的高度不确定由三部分叠加",
+                 fontsize=12.5, y=0.98)
+    fig.text(0.5, 0.03,
+             "直觉：远处/快速运动时定位误差大 → 该点高度不可信 → 融合时压低权重",
+             ha="center", fontsize=9, color="#636e72")
+    save(fig, "fig7_variance_propagation.png")
+
+
+# ---------------------------------------------------------------------------
+# 图 8: 平坦输出 → 控制量的推导链（Eq.17-21）
+# ---------------------------------------------------------------------------
+def fig8_flat_outputs_chain():
+    fig = plt.figure(figsize=(12.8, 5.4))
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.25], wspace=0.10)
+    fig.subplots_adjust(left=0.03, right=0.985, top=0.80, bottom=0.10)
+
+    # 左：几何示意
+    ax = fig.add_subplot(gs[0])
+    ax.set_title("从平面轨迹的「形状」推出车的动作", fontsize=10.5, pad=8)
+    ax.set_xlim(-0.15, 2.35); ax.set_ylim(-0.15, 2.0); ax.set_aspect("equal")
+    th = np.linspace(0, np.pi * 0.85, 120)
+    cx, cy, r = 1.05, 1.0, 0.85
+    ax.plot(cx + r * np.cos(th - 0.6), cy + r * np.sin(th - 0.6),
+            color="#0984e3", lw=2.6, label="轨迹 $(x(s), y(s))$")
+    for frac in (0.18, 0.5, 0.82):
+        i = int(frac * (len(th) - 1))
+        x, y = cx + r * np.cos(th[i] - 0.6), cy + r * np.sin(th[i] - 0.6)
+        ax.plot(x, y, "o", color="#d63031", ms=6, zorder=5)
+        # 切线方向 = 航向
+        dx = -r * np.sin(th[i] - 0.6); dy = r * np.cos(th[i] - 0.6)
+        n = math.hypot(dx, dy)
+        ax.annotate("", xy=(x + 0.28 * dx / n, y + 0.28 * dy / n), xytext=(x, y),
+                    arrowprops=dict(arrowstyle="-|>", color="#00b894", lw=1.8))
+    ax.text(1.95, 0.42, "切线方向\n= 航向 θ", fontsize=8.4, color="#00b894")
+    ax.text(0.30, 1.72, "曲线越弯 → 转向角越大\n→ 曲率 κ 决定 δ",
+            fontsize=8.6,
+            bbox=dict(boxstyle="round,pad=0.32", fc="#fdf6e3", ec="#b2bec3"))
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(alpha=0.25)
+
+    # 右：公式链
+    ax = fig.add_subplot(gs[1])
+    ax.axis("off")
+    ax.set_title("Eq.14→21：五次多项式 → 车辆控制量与受力", fontsize=10.5, pad=8)
+    blocks = [
+        ("① 参数化", r"$x(s)=c_x^T\beta(s),\ y(s)=c_y^T\beta(s)$", "#dfe6e9"),
+        ("② 航向", r"$\theta=\arctan2(\eta\dot y(s),\ \eta\dot x(s))$", "#dff9fb"),
+        ("③ 速度", r"$v_x=\dfrac{\dot s\sqrt{\dot x^2+\dot y^2}}{x_b^T x_{yaw}}$", "#dff9fb"),
+        ("④ 角速度", r"$\omega_z=\dfrac{\dot x\ddot y-\dot y\ddot x}{(\dot x^2+\dot y^2)\,z_b^Tb_3}\dot s$", "#dff9fb"),
+        ("⑤ 转向角", r"$\delta=\arctan2(L_w\,\omega_z,\ v_x)$", "#ffeaa7"),
+        ("⑥ 加速度", r"$a_x,\ a_y$  ← 含 $g\cdot x_b^Tb_3$ 重力项", "#fab1a0"),
+    ]
+    y = 0.92
+    for name, formula, col in blocks:
+        ax.add_patch(FancyBboxPatch((0.03, y - 0.115), 0.94, 0.115,
+                                    boxstyle="round,pad=0.02", fc=col, ec="#2d3436",
+                                    lw=1.0, transform=ax.transAxes))
+        ax.text(0.055, y - 0.055, name, fontsize=8.6, va="center", weight="bold",
+                transform=ax.transAxes)
+        ax.text(0.55, y - 0.055, formula, fontsize=8.4, va="center",
+                transform=ax.transAxes)
+        y -= 0.145
+    ax.text(0.5, 0.015,
+            "全部由 $(x(s), y(s), s(t))$ 及其导数解析得到 —— 这就是「平坦输出」的含义",
+            ha="center", fontsize=8.6, color="#0984e3", style="italic",
+            transform=ax.transAxes)
+
+    fig.suptitle("图 8  微分平坦的核心：只优化平面曲线的形状，车的所有动作都被解析地确定",
+                 fontsize=12.5, y=0.96)
+    save(fig, "fig8_flat_outputs.png")
+
+
+# ---------------------------------------------------------------------------
+# 图 9: 时间参数 vs 弧长参数
+# ---------------------------------------------------------------------------
+def fig9_s_parameterization():
+    fig, axes = plt.subplots(1, 2, figsize=(11.4, 3.9))
+    fig.subplots_adjust(left=0.08, right=0.97, top=0.78, bottom=0.22, wspace=0.22)
+
+    # (a) 时间参数：θ 与 t 耦合
+    ax = axes[0]
+    t = np.linspace(0, 5, 300)
+    v = 0.5 * np.sin(np.pi * t / 5) ** 2
+    # 用数值积分算 s(t)
+    s_cum = np.cumsum(v) * (t[1] - t[0])
+    s_cum = s_cum / s_cum[-1]
+    theta_path = 0.6 + 0.5 * s_cum        # 路径本身的航向（与 s 相关）
+    ax.plot(t, np.degrees(theta_path), color="#00b894", lw=2.4, label="真实航向")
+    bad = np.where(v < 0.06)[0]
+    ax.scatter(t[bad], np.degrees(theta_path[bad]) + np.random.default_rng(2)
+               .normal(0, 55, bad.size), s=8, color="#d63031", alpha=0.6)
+    ax.set_title("① 时间参数 $(x(t), y(t))$：低速段航向不可解", fontsize=10.2)
+    ax.set_xlabel("t [s]"); ax.set_ylabel("θ [deg]")
+    ax.text(2.5, 25, "红色区: $|v|\to0$\n→ $\\arctan2$ 病态", fontsize=8.2,
+            ha="center", color="#d63031",
+            bbox=dict(boxstyle="round,pad=0.3", fc="#ffeaa7", ec="#fdcb6e"))
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(alpha=0.3)
+
+    # (b) 弧长参数：θ 只依赖几何
+    ax = axes[1]
+    ax.plot(s_cum * 5, np.degrees(theta_path), color="#0984e3", lw=2.6,
+            label=r"$\theta=\arctan2(\eta\dot y(s),\eta\dot x(s))$")
+    ax.set_title("② 弧长参数 $(x(s), y(s))$：航向只由形状决定", fontsize=10.2)
+    ax.set_xlabel("等价时间轴（s 单调）"); ax.set_ylabel("θ [deg]")
+    ax.text(2.5, 25, "同一条曲线\n→ 同一个 θ\n与速度无关",
+            fontsize=8.4, ha="center",
+            bbox=dict(boxstyle="round,pad=0.32", fc="#dff9fb", ec="#22a6b3"))
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(alpha=0.3)
+
+    fig.suptitle("图 9  同一路径的两种参数化：时间参数会病态，弧长参数不会",
+                 fontsize=12.2, y=0.96)
+    save(fig, "fig9_s_parameterization.png")
+
+
 if __name__ == "__main__":
     print("生成原理图 →", OUT)
     fig1_why_se2()
@@ -457,4 +683,8 @@ if __name__ == "__main__":
     fig3_flatness()
     fig4_pipeline()
     fig5_optimization()
+    fig6_terrain_pose_mapping()
+    fig7_variance_propagation()
+    fig8_flat_outputs_chain()
+    fig9_s_parameterization()
     print("完成")

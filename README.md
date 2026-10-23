@@ -10,7 +10,8 @@
 > | 键盘开车 + 建图 | [HANDOVER.md §3.3 模式 B](HANDOVER.md#33-模式-b手动建图键盘驾驶--fast-lio2-建图) |
 > | 点击目标自动导航 | [HANDOVER.md §3.4 模式 C](HANDOVER.md#34-模式-c自动导航rviz-点击目标全自动) |
 > | 工程完成度 / 缺口 | [HANDOVER.md §1.3 完整性状态](HANDOVER.md#13-工程完整性状态) |
-> | **论文原理讲解（含 5 张原理图）** | **[docs/PRINCIPLE.md](docs/PRINCIPLE.md)** |
+> | **论文原理简版（含 5 张图）** | [docs/PRINCIPLE.md](docs/PRINCIPLE.md) |
+> | **从零读懂论文（含推导与自测题）** | **[docs/TUTORIAL.md](docs/TUTORIAL.md)** |
 > | 场景 XML 怎么设计、模型细节 | 本文档 §5、§8（下文） |
 >
 > **历史文档**（描述的是旧版快速原型，部分内容已过时，仅供参考）：
