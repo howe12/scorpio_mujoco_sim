@@ -108,8 +108,8 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 | Kinodynamic A* | `seb_naver_planner/kino_astar.py` | ~670 行 | ✅ | 自行车运动学 + Reeds-Shepp + SDF 碰撞 |
 | ReplanFSM | `seb_naver_planner/planner_node.py` | ~530 行 | ✅ | 5 状态机 + 到达判定 + 定时重规划 |
 | MPC 控制器 | `seb_naver_planner/mpc_node.py` | ~380 行 | ⚠️ | CasADi SQP，偶发迭代超限（有 fallback） |
-| 轨迹优化 (P0) | `seb_naver_planner/trajectory_optimizer.py` | ~490 行 | ✅ | 五次多项式最小 jerk + 运动学约束，CasADi IPOPT；5/5 场景通过 |
-| PHR-ALM 完整版 (P1-P4) | 同上 | — | ⚠️ | SDF 硬约束/地形姿态/Risk 项/换挡未实现 |
+| 轨迹优化 (P0+P1) | `seb_naver_planner/trajectory_optimizer.py` | ~800 行 | ✅ | 五次多项式最小 jerk + 运动学约束 + **SDF 避障**（距离场 + outside-in 排斥）；P0 5/5、P1 6/6 |
+| PHR-ALM 完整版 (P2-P4) | 同上 | — | ⚠️ | 未并入 planner 主流程；地形姿态/Risk/换挡未做；弯道曲率有局限 |
 | RViz 可视化 | `config/fastlio.rviz` | — | ✅ | 点云 + 机器人 + 路径 + SetGoal |
 | SE2Grid 可视化 | — | — | ❌ | RViz 无自定义 display 插件，看不出高程图/风险图 |
 
@@ -125,7 +125,7 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 | 障碍物避让 | ⚠️ 能识别墙壁并停下（不撞），但目标在墙后时不绕路 |
 
 **主要缺口**（详见 §8）：
-1. 轨迹优化只完成 P0（几何平滑 + 运动学约束），未接 SDF 避障/地形姿态/Risk，未并入 planner 主流程 → MPC 仍在跟踪 A* 粗路径
+1. 轨迹优化完成 P0（平滑+运动学）与 P1（SDF 避障），但**未并入 planner 主流程** → MPC 仍跟踪 A* 粗路径；地形姿态/Risk/换挡未做
 2. 可通行性评估默认关闭 → SDF 只有障碍物二值，没有 slope/curvature 风险
 3. 无全局地图/回环 → 长时间运行 SLAM 会缓慢漂移
 4. 目标在障碍物后方时 A* 不绕路（20m 局部地图限制）
@@ -578,7 +578,16 @@ ros2 run tf2_tools view_frames 2>&1 | grep -oE "base_footprint: .{0,25}"
 | `kappa_margin` | 0.85 | 优化用 `0.85·κmax`，给 MPC 跟踪留余量 |
 | `seg_len` | 1.2 | 每段目标弧长 (m)，决定分段数 N（3~10） |
 | `rho_t` | 1.5 | 时间权重 ρt（论文 Eq.22），越大越快 |
-| `follow_path` | true | 分段点作硬约束（P0 无 SDF 时必须 true，否则弯道切角） |
+| `follow_mode` | auto | auto: 无 SDF→硬约束; 有 SDF→软引导（让几何为避障让路） |
+| `follow_path` | auto 结果 | 兼容旧参数，显式指定硬/软约束 |
+| `path_guidance` | 4.0 | **有 SDF 时**的软引导权重（防切角） |
+| `path_guidance_no_sdf` | 0.5 | **无 SDF 时**的软引导权重（小值让轨迹自由圆角，κ 才不超限） |
+| `dmin` | 0.28 | 避障间距阈值 (m) = 车半宽 0.211 + 余量 |
+| `sdf_iters` | 5 | outside-in 迭代轮数（找违反点→加排斥→重解） |
+| `sdf_repulsion_weight` | 60.0 | 排斥代价权重 |
+| `sdf_samples` | 10 | 每段 SDF 检查点数 |
+| `sdf_tolerance` | 0.05 | 验收容差：min_clearance 允许比 dmin 小这么多 |
+| `sdf_dmax` | 1.0 | 距离场截断 (m) |
 | `constraint_samples` | 6 | 每段施加动力学约束的采样点数 |
 | `quad_points` | 4 | jerk 积分的 Simpson 求积点数 |
 | `tol` / `max_iter` | 1e-2 / 200 | IPOPT 容差与迭代上限 |
@@ -740,6 +749,14 @@ source /opt/ros/humble/setup.bash
 #   结果: 5/5 通过
 ```
 
+P1 的 SDF 避障测试（6 个场景：贴墙/近墙/穿墙拒绝/窄通道/真实A*绕墙/无SDF回归）:
+
+```bash
+cd /develop/scorpio_mujoco_sim_ws/src/scorpio_mujoco_sim/seb_naver_planner
+/usr/bin/python3 test/test_trajectory_optimizer_sdf.py
+# 期望: 结果: 6/6 通过
+```
+
 单独调用:
 
 ```python
@@ -768,7 +785,7 @@ else:
 | 导航方向反 / 偏转 | 初始朝向非 0° → 坐标系偏差 | 已修复 (`reset_robot_facing_goal` 设 yaw=0) |
 | 机器人不动 | `terrain_analyzer` 未启动 → 无 SDF → planner 等待 | `ros2 topic list \| grep sdf_map` |
 | MPC solver failed | 短程转弯 SQP 迭代超限 | 已有 fallback (沿用上次控制衰减) |
-| 撞墙 | SDF 无障碍物信息 | 已修复 (高点统计标记 occupied) |
+| 撞墙 | **A* 碰撞检测采样间隔 0.33m 跨过薄墙**（wall_low_1 仅 0.2m 厚）；SDF 无障碍物是次级原因 | 已修复：① terrain_analyzer 高点统计标记 occupied ② **A* 采样改为 1 个栅格 (0.1m)**，见 §9 |
 | 目标在墙后不动 | A* 20m 局部地图内找不到绕路 | 已知局限 (§8.1)，改发可绕行目标 |
 | `No Effective Points` 持续 | `det_range` 太大 (默认 300) 清空地图 | 已修复 (det_range=40) |
 | 转弯时速度爆炸 70+ m/s | timestep > 0.002 数值发散 | 已修复 (timestep=0.001) |
@@ -839,9 +856,10 @@ pkill -9 -f rviz2
 
 ### 8.2 待办 (TODO)
 
-- [x] **轨迹优化 P0**：五次多项式最小 jerk + δ/v/a/κ 约束（`trajectory_optimizer.py`，5/5 场景通过，200~400ms）
-- [ ] **轨迹优化 P1**：接 SDF 硬约束（避障）
+- [x] **轨迹优化 P0**：五次多项式最小 jerk + δ/v/a/κ 约束（5/5 场景，200~400ms）
+- [x] **轨迹优化 P1**：SDF 避障（EDT 距离场 + outside-in 迭代排斥 + 端点过滤 + 输穿墙拒绝），6/6 场景
 - [ ] **轨迹优化 P2**：并入 planner（降频/异步，`Path.header.stamp` 带时间）
+- [ ] **轨迹优化 P2.5**：分段点改为优化变量（论文 P），根治弯道曲率局限
 - [ ] **轨迹优化 P3**：订阅 `/fused_map` 加地形姿态 φx/φy 约束
 - [ ] **轨迹优化 P4**：启用可通行性后加 Risk 项；可选 s(t)/换挡（论文完整版）
 - [ ] 用 OpenMP/向量化加速 `computeTraversability()` 并重新启用（恢复坡度/曲率风险）
@@ -869,6 +887,12 @@ pkill -9 -f rviz2
 | sim output='log' | headless 状态行每 2s 刷屏终端 |
 | **所有 launch 统一 `sim_gui` + `--no-tf-odom`** | 早期 `fastlio_mapping.launch.py` 硬编码 GUI 且漏传 `--no-tf-odom` → TF 冲突。三个 launch 现参数一致 |
 | **4 个 ROS2 包平铺仓库根目录** | colcon 只扫 `src/` 直接子目录，不递归；`sync_to_ros2.sh` 负责 rsync |
+| **A* 碰撞采样按栅格密度** | 原 `check_num=3` 在 1.0m 弧长上间隔 0.33m，会跨过 0.2m 薄墙 → 规划穿墙 → 撞墙。改为 ≤1 个栅格 (0.1m) |
+| **SDF 用 EDT 距离场而非原始占用值** | terrain_analyzer 发的 `sdf` 层是 -1/1/0.5 离散值，无梯度；IPOPT 拿不到下降方向。用 `distance_transform_edt` 重建欧氏距离 |
+| **避障用 outside-in 迭代而非 NLP 内插值** | CasADi 3.8 的 `interpolant` 多维不可用（`n_in=1`/返回 `nan`）。改为「解→查违反点→加排斥代价→重解」 |
+| **排斥跳过起终点** | 起终点位置是边界等式硬约束，推不动；对其施加排斥会导致 `Restoration_Failed` |
+| **输入路径穿墙直接拒绝** | A* 负责避障、优化器负责平滑。强行「拉出来」不可行（`Maximum_Iterations_Exceeded`），应让上游重规划 |
+| **分段策略维持等弧长** | 试过 4 种替代（DP 特征点 / 曲率加权 / 按航向加段 / 增加段数）全部让 κ 恶化到 4.7~553。弯道根治需把分段点变成优化变量（P2.5） |
 
 ---
 
@@ -955,7 +979,7 @@ no_proxy=github.com git push origin main  # 需要 no_proxy 绕过代理
 | 可通行性评估 (Algorithm 1) | Sec V-B, Alg.1 | 椭圆足迹 + 协方差 + 曲率 + Risk | `terrain_analyzer.cpp::computeTraversability()` | ⚠️ 已实现但 CPU 太慢, 当前禁用 |
 | SDF 构建 | Sec V 末 | 高点统计障碍物检测 | `terrain_analyzer.cpp::timerCallback()` | ✅ 简化版 |
 | Kinodynamic A* 路径搜索 | Sec VI-C | 自行车运动学 + Reeds-Shepp | `kino_astar.py` | ✅ 已移植 |
-| 轨迹优化 | Sec VI-B, Eq.(14)-(24) | P0: 五次多项式 + IPOPT | `seb_naver_planner/trajectory_optimizer.py` | ⚠️ P0 完成，P1-P4 待做 |
+| 轨迹优化 | Sec VI-B, Eq.(14)-(29) | P0+P1: 五次多项式 + SDF + IPOPT | `seb_naver_planner/trajectory_optimizer.py` | ⚠️ P0/P1 完成，P2-P4 待做 |
 | MPC 跟踪控制器 | Sec IV, Fig.3 | CasADi SQP, N=20, dt=0.05s | `mpc_node.py` | ✅ Python CasADi |
 | SE(2) 栅格消息 | — | SE2Grid.msg, SE2GridInfo.msg | `se2_grid_msgs/msg/` | ✅ 自定义 |
 

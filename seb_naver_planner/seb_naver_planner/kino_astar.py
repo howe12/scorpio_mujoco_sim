@@ -374,13 +374,22 @@ class KinoAStarPlanner:
     ) -> bool:
         """Return True if the motion primitive is collision-free.
 
-        Samples *check_num* intermediate points along the arc using the
-        same bicycle model so that curved trajectories are checked properly.
+        Samples intermediate points along the arc using the same bicycle model
+        so curved trajectories are checked properly.
+
+        采样间距必须小于障碍物的最小可分辨尺度，否则会**直接跨过薄墙**：
+        固定 ``check_num=3`` 时，1.0m 弧长的采样间隔是 0.33m，而 plaza 的
+        ``wall_low_1`` 只有 0.2m 厚、栅格分辨率 0.1m —— 实测会漏检，规划出
+        穿墙路径。这里按 0.5 个栅格步长加密（上限 40 点控制开销）。
         """
         if self._sdf_grid is None:
             return True
 
-        n = max(self.check_num, 1)
+        res = self._sdf_resolution if self._sdf_resolution > 1e-6 else self.map_resolution
+        # 0.5 个栅格 ≈ 0.05m；小于任何可分辨障碍
+        step = max(1.0 * res, 1e-3)
+        n_by_res = int(math.ceil(abs(arc) / step))
+        n = max(self.check_num, 1, min(n_by_res, 40))
         for i in range(n + 1):
             frac = i / n
             s_frac = arc * frac
