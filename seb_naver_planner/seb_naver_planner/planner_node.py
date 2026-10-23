@@ -168,6 +168,137 @@ class SDFGridParser:
 
 
 # ---------------------------------------------------------------------------
+# Elevation Grid Parser (P3: 地形姿态约束)
+# ---------------------------------------------------------------------------
+class ElevationGridParser:
+    """解析 /fused_map 的 elevation / lower_bound / upper_bound 层。
+
+    用于计算地形坡度与车体姿态（论文 Eq.27 的 φx/φy 约束）。
+    地形是逐点融合的，未观测区域的 elevation 保持默认值，必须靠
+    ``upper_bound - lower_bound`` 判别有效性，否则会把「没看过的地方」
+    当成陡坡。
+    """
+
+    def __init__(self) -> None:
+        self.elevation: Optional[np.ndarray] = None
+        self.valid: Optional[np.ndarray] = None
+        self.resolution: float = 0.0
+        self.length_x: float = 0.0
+        self.length_y: float = 0.0
+        self.map_center_x: float = 0.0
+        self.map_center_y: float = 0.0
+        self.rows: int = 0
+        self.cols: int = 0
+        self.updated: bool = False
+
+    @staticmethod
+    def _extract(msg: SE2Grid, name: str, rows: int, cols: int) -> Optional[np.ndarray]:
+        """取某一层并按圆形缓冲偏移 roll 回逻辑原点。"""
+        idx: Optional[int] = None
+        for i, nm in enumerate(msg.layers):
+            if nm == name:
+                idx = i
+                break
+        if idx is None:
+            return None
+        raw = np.array(msg.data[idx].data, dtype=np.float32)
+        n = rows * cols
+        if raw.size < n:
+            return None
+        grid = raw[:n].reshape((rows, cols))
+        start_row = int(msg.start_index_row) % rows
+        start_col = int(msg.start_index_col) % cols
+        return np.roll(np.roll(grid, -start_row, axis=0), -start_col, axis=1)
+
+    def update_from_msg(self, msg: SE2Grid) -> None:
+        info = msg.info
+        if info.pos_resolution <= 0.0:
+            return
+        self.resolution = float(info.pos_resolution)
+        self.length_x = float(info.length_x)
+        self.length_y = float(info.length_y)
+        self.map_center_x = float(info.pose.position.x)
+        self.map_center_y = float(info.pose.position.y)
+        self.rows = int(round(self.length_y / self.resolution))
+        self.cols = int(round(self.length_x / self.resolution))
+        if self.rows <= 0 or self.cols <= 0:
+            return
+
+        elev = self._extract(msg, "elevation", self.rows, self.cols)
+        if elev is None:
+            return
+        self.elevation = elev
+
+        lo = self._extract(msg, "lower_bound", self.rows, self.cols)
+        hi = self._extract(msg, "upper_bound", self.rows, self.cols)
+        finite = np.isfinite(elev)
+        if lo is not None and hi is not None:
+            # 置信区间窄的地方才是真正观测过的地形
+            self.valid = finite & np.isfinite(hi) & np.isfinite(lo) & ((hi - lo) < 0.5)
+        else:
+            self.valid = finite
+        self.updated = True
+
+    def world_to_grid(self, x: float, y: float) -> Tuple[int, int]:
+        col = int(round((x - (self.map_center_x - self.length_x / 2.0)) / self.resolution))
+        row = int(round((y - (self.map_center_y - self.length_y / 2.0)) / self.resolution))
+        return row, col
+
+    #: 差分半窗（格数）。1 格 (0.1m) 基线会把厘米级高程噪声放大成度数：
+    #: 5cm 高差 / 0.2m ≈ 14°，实测平地 plaza 也会被判姿态超限。
+    SLOPE_HALF_WINDOW = 2
+
+    def slope_at(self, x: float, y: float) -> Optional[Tuple[float, float]]:
+        """返回 (dz/dx, dz/dy)；该处地形未观测时返回 None。"""
+        if self.elevation is None or self.valid is None:
+            return None
+        row, col = self.world_to_grid(x, y)
+        w = self.SLOPE_HALF_WINDOW
+        if not (w <= row < self.rows - w and w <= col < self.cols - w):
+            return None
+        if not self.valid[row, col]:
+            return None
+        span = 2.0 * w * self.resolution
+        dzdx = (self.elevation[row, col + w] - self.elevation[row, col - w]) / span
+        dzdy = (self.elevation[row + w, col] - self.elevation[row - w, col]) / span
+        return float(dzdx), float(dzdy)
+
+    def attitude_at(self, x: float, y: float, yaw: float) -> Optional[Tuple[float, float]]:
+        """车体在地形上的俯仰/横滚角 (rad)：φx 俯仰、φy 横滚。
+
+        俯仰 = 沿车头方向的地形坡角；横滚 = 沿车侧方向的地形坡角。
+        """
+        g = self.slope_at(x, y)
+        if g is None:
+            return None
+        dzdx, dzdy = g
+        c, s = math.cos(yaw), math.sin(yaw)
+        # 车头方向 (c, s)、左侧方向 (-s, c)
+        dz_fwd = dzdx * c + dzdy * s
+        dz_lat = -dzdx * s + dzdy * c
+        return math.atan(dz_fwd), math.atan(dz_lat)
+
+    def untraversable_mask(self, max_slope_rad: float) -> np.ndarray:
+        """坡度超过阈值的格子（用于喂给 A* 当障碍）。"""
+        n = self.rows * self.cols
+        mask = np.zeros((self.rows, self.cols), dtype=bool)
+        if self.elevation is None or self.valid is None or max_slope_rad <= 0.0:
+            return mask
+        z = np.where(self.valid, self.elevation, np.nan)
+        # 3×3 均值平滑：单格噪声在 0.1m 基线上会放大成几十度的假坡度
+        try:
+            from scipy.ndimage import uniform_filter
+            filled = np.where(np.isfinite(z), z, np.nanmean(z[np.isfinite(z)]) if np.isfinite(z).any() else 0.0)
+            z = np.where(self.valid, uniform_filter(filled, size=3), np.nan)
+        except ImportError:
+            pass
+        dzdy, dzdx = np.gradient(z, self.resolution)
+        slope = np.arctan(np.hypot(dzdx, dzdy))
+        mask = np.isfinite(slope) & (slope > max_slope_rad)
+        return mask
+
+
+# ---------------------------------------------------------------------------
 # PlanManager
 # ---------------------------------------------------------------------------
 class PlanManager:
@@ -184,9 +315,15 @@ class PlanManager:
     这样最坏情况只是「晚一次重规划才用上优化轨迹」，不会卡住 FSM。
     """
 
-    def __init__(self, node: Node, sdf_parser: SDFGridParser) -> None:
+    def __init__(
+        self,
+        node: Node,
+        sdf_parser: SDFGridParser,
+        elev_parser: Optional["ElevationGridParser"] = None,
+    ) -> None:
         self._node = node
         self._sdf = sdf_parser
+        self._elev = elev_parser
 
         # Parameters (declared on the node)
         self.wheel_base: float = node.get_parameter("wheel_base").value
@@ -223,6 +360,8 @@ class PlanManager:
         self._opt_ok: int = 0
         self._opt_fail: int = 0
         self._opt_skip_short: int = 0
+        self._opt_attitude_reject: int = 0
+        self._slope_fallback: int = 0
         # 过短的路径不优化：N 会被压到 3 段、段长 <0.7m，五次多项式病态，
         # 优化结果几乎必然 κ 超限（实测短路径场景 17/19 被拒）。
         self.min_optimize_length: float = node.get_parameter(
@@ -235,6 +374,15 @@ class PlanManager:
         # 实测规划出的路径线段最小间距只有 0.157m，而车体半宽 0.211m —— 车身会蹭墙。
         # 把障碍物按此半径膨胀后再给 A*，路径才会真正留出车宽。
         self.inflation_radius: float = node.get_parameter("inflation_radius").value
+        # ---- 地形姿态 (P3, 论文 Eq.27 的 φx/φy) ----
+        # 坡度超过 max_slope 的区域直接当作不可通行（A* 避开陡坡）
+        self.max_slope_deg: float = node.get_parameter("max_slope_deg").value
+        # 轨迹验收：俯仰/横滚超过阈值判失败
+        self.max_pitch_deg: float = node.get_parameter("max_pitch_deg").value
+        self.max_roll_deg: float = node.get_parameter("max_roll_deg").value
+        # 验收容差：高程图有厘米级噪声，轻微超限不拒绝整条轨迹
+        self.attitude_tolerance: float = node.get_parameter(
+            "attitude_tolerance").value
         # 剩余轨迹短于此值则视为不可用，等待下一次优化
         self.optimize_min_remaining: float = node.get_parameter(
             "optimize_min_remaining").value
@@ -295,13 +443,26 @@ class PlanManager:
             'width': self._sdf.sdf_map.shape[1] if self._sdf.sdf_map is not None else 0,
             'height': self._sdf.sdf_map.shape[0] if self._sdf.sdf_map is not None else 0,
         }
-        grid_for_astar = self._inflate_sdf(self._sdf.sdf_map)
+        grid_obstacles = self._inflate_sdf(self._sdf.sdf_map)
+        # 坡度超限区域视为障碍（与障碍物同等处理，A* 自然绕开陡坡）
+        grid_for_astar = self._apply_slope_mask(grid_obstacles, sdf_info)
         status, path = self._kino_astar.search(
             start_state=(start_x, start_y, start_yaw),
             goal_state=(goal_x, goal_y, goal_yaw),
             sdf_grid_data=grid_for_astar,
             sdf_info=sdf_info,
         )
+        if status != SearchStatus.SUCCESS and grid_for_astar is not grid_obstacles:
+            # 坡度过滤把唯一通路挡住了 → 退化为「只避开障碍物」再找一次。
+            # 宁可走一段陡坡（姿态验收会在轨迹层面拦下极端情况），
+            # 也不要因为地图边缘的坡度噪声整段规划失败（实测 15~68 次失败）。
+            self._slope_fallback += 1
+            status, path = self._kino_astar.search(
+                start_state=(start_x, start_y, start_yaw),
+                goal_state=(goal_x, goal_y, goal_yaw),
+                sdf_grid_data=grid_obstacles,
+                sdf_info=sdf_info,
+            )
 
         if status != SearchStatus.SUCCESS or not path:
             self._node.get_logger().error(f"PlanManager: A* search failed (status={status.name})")
@@ -327,8 +488,83 @@ class PlanManager:
         # ---- 选择本次交给 MPC 的轨迹 ----
         optimized = self._fresh_optimized(start_x, start_y)
         traj = optimized if optimized is not None else rough
+
+        # 姿态验收（论文 Eq.27）: 俯仰/横滚超限则丢弃优化结果，回退 A* 粗路径
+        worst = self._check_attitude(traj)
+        if worst is not None and optimized is not None:
+            limit = math.radians(max(self.max_pitch_deg, self.max_roll_deg))
+            if worst > limit * self.attitude_tolerance:
+                self._opt_attitude_reject += 1
+                self._node.get_logger().warn(
+                    f"traj rejected by attitude: {math.degrees(worst):.1f}° > "
+                    f"max(pitch={self.max_pitch_deg:.0f}°, roll={self.max_roll_deg:.0f}°) "
+                    f"→ 用 A* 粗路径")
+                traj = rough
+
         self.last_traj = traj
         return traj
+
+    def _apply_slope_mask(self, grid: np.ndarray, sdf_info: Dict) -> np.ndarray:
+        """把坡度超限的地形格标为 occupied。
+
+        论文 Eq.27 用 φx²/φy² ≤ 上限约束车体姿态。姿态由地形决定，**不是**
+        速度或轨迹形状能改变的，所以它本质上是「路径可行性」约束：等价于把
+        过陡区域当作障碍，交给 A* 绕开。
+        """
+        if self._elev is None or self.max_slope_deg <= 0.0:
+            return grid
+        if self._elev.elevation is None:
+            return grid
+        max_slope = math.radians(self.max_slope_deg)
+        mask = self._elev.untraversable_mask(max_slope)
+        if not mask.any():
+            return grid
+        # 两个栅格尺寸/原点应一致（都由 terrain_analyzer 发布）
+        if mask.shape != grid.shape:
+            return grid
+
+        # 关键：排除「未观测」区域。
+        # terrain_analyzer 的 fuseAll 只在 raw_elev 有限时写 elevation，
+        # 未观测格保持默认值（0）——它与实测地面高度差在边界上形成假陡坡，
+        # 实测会把大片区域标成不可通行，A* 连续 68 次找不到路径。
+        # sdf_map 的 0.5=unknown 正好标记这些格子。
+        if self._sdf.sdf_map is not None and self._sdf.sdf_map.shape == mask.shape:
+            unknown = np.abs(np.asarray(self._sdf.sdf_map) - 0.5) < 1e-3
+            mask = mask & ~unknown
+        if not mask.any():
+            return grid
+
+        # 形态学开运算：去掉单格噪声（树根、碎石的单点高差）
+        try:
+            from scipy.ndimage import binary_opening
+            mask = binary_opening(mask, structure=np.ones((2, 2)))
+        except ImportError:
+            pass
+        if not mask.any():
+            return grid
+
+        out = np.array(grid, copy=True)
+        out[mask] = -1.0
+        return out
+
+    def _check_attitude(
+        self, traj: List[Tuple[float, float, float]]
+    ) -> Optional[float]:
+        """验收轨迹上的俯仰/横滚角，返回最大姿态角 (rad)；无地形数据返回 None。"""
+        if self._elev is None or self._elev.elevation is None or not traj:
+            return None
+        max_pitch = math.radians(self.max_pitch_deg)
+        max_roll = math.radians(self.max_roll_deg)
+        worst = 0.0
+        for x, y, th in traj:
+            att = self._elev.attitude_at(x, y, th)
+            if att is None:
+                continue
+            pitch, roll = att
+            worst = max(worst, abs(pitch), abs(roll))
+            if abs(pitch) > max_pitch or abs(roll) > max_roll:
+                return worst
+        return worst
 
     def _inflate_sdf(self, grid: np.ndarray) -> np.ndarray:
         """按车体半径膨胀障碍物（返回新的栅格，不修改输入）。"""
@@ -511,6 +747,11 @@ class SebNaverPlannerNode(Node):
         self.declare_parameter("traj_publish_step", 0.3)
         self.declare_parameter("optimize_min_remaining", 1.5)
         self.declare_parameter("inflation_radius", 0.25)
+        # ---- 地形姿态 (P3) ----
+        self.declare_parameter("max_slope_deg", 25.0)   # 超过则不可通行 (A* 绕开)
+        self.declare_parameter("max_pitch_deg", 20.0)   # 轨迹验收: 俯仰
+        self.declare_parameter("max_roll_deg", 15.0)    # 轨迹验收: 横滚
+        self.declare_parameter("attitude_tolerance", 1.3)  # 验收容差倍数
 
         # Cache tolerances
         self._tol_dist: float = self.get_parameter("goal_tolerance_dist").value
@@ -527,9 +768,10 @@ class SebNaverPlannerNode(Node):
 
         # SDF grid parser
         self._sdf_parser = SDFGridParser()
+        self._elev_parser = ElevationGridParser()
 
         # Plan manager
-        self._plan_manager = PlanManager(self, self._sdf_parser)
+        self._plan_manager = PlanManager(self, self._sdf_parser, self._elev_parser)
 
         # ---- QoS profiles ----
         # /Odometry (FAST-LIO2) 和 /sdf_map (terrain_analyzer) 都用 RELIABLE 发布
@@ -545,6 +787,9 @@ class SebNaverPlannerNode(Node):
         )
         self._sdf_sub = self.create_subscription(
             SE2Grid, "/sdf_map", self._sdf_callback, sensor_qos
+        )
+        self._fused_sub = self.create_subscription(
+            SE2Grid, "/fused_map", self._fused_callback, sensor_qos
         )
         self._goal_sub = self.create_subscription(
             PoseStamped, "/goal_pose", self._goal_callback, 10
@@ -568,6 +813,10 @@ class SebNaverPlannerNode(Node):
 
     def _sdf_callback(self, msg: SE2Grid) -> None:
         self._sdf_parser.update_from_msg(msg)
+
+    def _fused_callback(self, msg: SE2Grid) -> None:
+        """地形高程图（P3）: 用于坡度过滤与姿态验收。"""
+        self._elev_parser.update_from_msg(msg)
 
     def _goal_callback(self, msg: PoseStamped) -> None:
         self._goal = msg

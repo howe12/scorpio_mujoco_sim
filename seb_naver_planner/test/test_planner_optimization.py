@@ -69,6 +69,10 @@ class FakeNode:
         "traj_publish_step": 0.3,
         "optimize_min_remaining": 1.5,
         "inflation_radius": 0.25,
+        "max_slope_deg": 30.0,
+        "max_pitch_deg": 20.0,
+        "max_roll_deg": 15.0,
+        "attitude_tolerance": 1.3,
     }
 
     def __init__(self):

@@ -108,8 +108,8 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 | Kinodynamic A* | `seb_naver_planner/kino_astar.py` | ~670 行 | ✅ | 自行车运动学 + Reeds-Shepp + SDF 碰撞 |
 | ReplanFSM | `seb_naver_planner/planner_node.py` | ~530 行 | ✅ | 5 状态机 + 到达判定 + 定时重规划 |
 | MPC 控制器 | `seb_naver_planner/mpc_node.py` | ~380 行 | ⚠️ | CasADi SQP，偶发迭代超限（有 fallback） |
-| 轨迹优化 (P0~P2.5) | `trajectory_optimizer.py` + `planner_node.py` | ~1250 行 | ✅ | 五次多项式最小 jerk + SDF 避障 + 异步接入 + **A* 车体膨胀**；P0 5/5、P1 6/6、P2 3/3、端到端到达 |
-| PHR-ALM 完整版 (P3-P4) | 同上 | — | ⚠️ | 地形姿态/Risk/换挡未做；MPC 巡航速度偏低 |
+| 轨迹优化 (P0~P3) | `trajectory_optimizer.py` + `planner_node.py` | ~1500 行 | ✅ | 最小 jerk + SDF 避障 + 异步接入 + A* 车体膨胀 + **地形姿态约束**；P0 5/5、P1 6/6、P2 3/3、P3 6/6 |
+| PHR-ALM 完整版 (P4) | 同上 | — | ⚠️ | Risk 项（需先启用可通行性）/换挡/s(t) 未做；MPC 巡航速度偏低 |
 | RViz 可视化 | `config/fastlio.rviz` | — | ✅ | 点云 + 机器人 + 路径 + SetGoal |
 | SE2Grid 可视化 | — | — | ❌ | RViz 无自定义 display 插件，看不出高程图/风险图 |
 
@@ -609,6 +609,10 @@ ros2 run tf2_tools view_frames 2>&1 | grep -oE "base_footprint: .{0,25}"
 | `inflation_radius` | 0.25 | **A* 障碍物膨胀半径 (m)**，按车体半宽 0.211 + 余量 |
 | `follow_mode` | hard | hard: 分段点硬约束（推荐）；soft: 节点变优化变量；auto: 有 SDF 走 soft |
 | `node_motion_margin` | 0.60 | soft 模式下节点相对 A* 点的最大偏移 (m) |
+| `max_slope_deg` | 30.0 | 坡度超过则不可通行（A* 绕开），论文 φx/φy 的等效实现 |
+| `max_pitch_deg` | 20.0 | 轨迹姿态验收：俯仰上限 |
+| `max_roll_deg` | 15.0 | 轨迹姿态验收：横滚上限（车体窄，侧翻更敏感） |
+| `attitude_tolerance` | 1.3 | 姿态验收容差倍数（高程图有厘米级噪声） |
 
 > 求解用 IPOPT + `hessian_approximation=limited-memory`。实测：用精确 Hessian 需 1300ms，
 > 改 L-BFGS 后降到 200~400ms，精度仍满足约束。
@@ -887,7 +891,7 @@ pkill -9 -f rviz2
 - [x] **轨迹优化 P1**：SDF 避障（EDT 距离场 + outside-in 迭代排斥 + 端点过滤 + 输穿墙拒绝），6/6 场景
 - [x] **轨迹优化 P2**：异步接入 planner（单线程 executor + 结果缓存 + 身后裁剪 + 弧长重采样），失败自动回退 A* 粗路径；集成 3/3、端到端到达
 - [x] **轨迹优化 P2.5**：① `follow_mode` 默认 hard（软引导是 κ 尖峰的真凶）② free nodes 分段点变优化变量 ③ **A* 车体膨胀 `inflation_radius=0.25`**（路径间距 0.157→0.335m）
-- [ ] **轨迹优化 P3**：订阅 `/fused_map` 加地形姿态 φx/φy 约束
+- [x] **轨迹优化 P3**：订阅 `/fused_map` 解析 elevation → 坡度超限区当障碍（A* 绕开）+ 轨迹姿态验收（φx/φy），6/6 单测
 - [ ] **轨迹优化 P4**：启用可通行性后加 Risk 项；可选 s(t)/换挡（论文完整版）
 - [ ] 用 OpenMP/向量化加速 `computeTraversability()` 并重新启用（恢复坡度/曲率风险）
 - [ ] 真实 SDF 构建（欧氏距离变换），替代高点计数
@@ -931,6 +935,10 @@ pkill -9 -f rviz2
 | **free nodes 的 C 连续从 1 阶起** | 节点等式已承担位置连续性；再叠加 order=0 的 C⁴ 约束会线性相关 → `Restoration_Failed` |
 | **排斥 push 限幅 0.35m** | 障碍内部时 `(dmin-c)` 可达 0.5m，1.5 倍放大后目标点跳太远 + 大权重 → `Error_In_Step_Computation` |
 | **A* 前膨胀障碍物** | A* 只看格子占用、不看车体尺寸，路径线段间距实测仅 0.157m（车半宽 0.211m）→ 车身蹭墙。膨胀 0.25m 后 0.335m |
+| **姿态约束实现为「A* 障碍 + 轨迹验收」** | 姿态由地形决定，不是速度/轨迹形状能改变的，所以论文 Eq.27 的 φx/φy 本质是路径可行性约束：陡坡当障碍让 A* 绕开，再用验收拦下极端轨迹 |
+| **坡度 mask 排除 SDF unknown 区** | 未观测格 elevation 保持默认 0，与实测地面形成假陡坡，实测把大片区域标成不可通行、A* 连续 68 次失败。用 `sdf_map==0.5` 排除 |
+| **坡度过滤无解时回退纯障碍规划** | 坡度 mask 可能挡住唯一通路（实测 15 次 A* 失败）。安全侧由轨迹姿态验收兜底，不应整段规划失败 |
+| **坡度差分用 ±2 格 (0.4m) 基线 + 3×3 平滑** | 1 格 (0.1m) 基线上厘米级高程噪声会放大成十几度，实测平地 plaza 也被判姿态超限 |
 
 ---
 
