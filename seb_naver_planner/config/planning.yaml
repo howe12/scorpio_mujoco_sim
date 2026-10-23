@@ -51,6 +51,14 @@ seb_naver_planner:
     max_pitch_deg: 20.0            # 轨迹验收: 俯仰上限
     max_roll_deg: 15.0             # 轨迹验收: 横滚上限（车体窄，侧翻更敏感）
     attitude_tolerance: 1.3        # 验收容差倍数（高程图有厘米级噪声）
+    # ---- 可通行性风险 (P4, 论文 Eq.28 的 rmax + Eq.22 的 ρr 项) ----
+    # risk 由 planner 按需计算（论文 Algorithm 1 的 numpy 版，只算轨迹点）。
+    # terrain_analyzer 的全图 SE(2) 版实测 12s/次，不可实时，默认关闭。
+    risk_limit: 0.8                # 超过当障碍（A* 绕开）+ 轨迹硬验收
+    risk_soft_limit: 0.5           # 轨迹平均风险软阈值（近似 ρr·∫Risk²）
+    # A* 全图 risk 过滤: 实测单点 ~500μs，图上数千抽样点需数秒，不可实时。
+    # 规划期由坡度约束覆盖（max_slope_deg），risk 只用于轨迹验收（30 点约 15ms）。
+    risk_astar_weight: -1.0        # <0 关闭 A* risk 过滤; >=0 启用
 
 mpc_controller:
   ros__parameters:

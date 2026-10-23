@@ -14,6 +14,7 @@ find_package(se2_grid_core REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io filters)
 find_package(pcl_conversions REQUIRED)
+find_package(OpenMP QUIET)
 
 add_executable(terrain_analyzer_node src/terrain_analyzer.cpp)
 
@@ -28,6 +29,12 @@ target_link_libraries(terrain_analyzer_node
   ${se2_grid_core_LIBRARIES}
   ${PCL_LIBRARIES}
 )
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(terrain_analyzer_node OpenMP::OpenMP_CXX)
+  message(STATUS "terrain_analyzer: OpenMP enabled (traversability parallelized)")
+else()
+  message(WARNING "terrain_analyzer: OpenMP not found, traversability will be single-threaded")
+endif()
 
 ament_target_dependencies(terrain_analyzer_node
   rclcpp

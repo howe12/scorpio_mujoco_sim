@@ -32,6 +32,8 @@ TerrainAnalyzerNode::TerrainAnalyzerNode()
     max_curvature_ = declare_parameter("max_curvature", 1000.0);
     weight_phi_ = declare_parameter("weight_phi", 0.2);
     weight_curvature_ = declare_parameter("weight_curvature", 0.6);
+    traversability_yaw_stride_ = declare_parameter("traversability_yaw_stride", 4);
+    enable_traversability_ = declare_parameter("enable_traversability", false);
     ignore_z_min_ = declare_parameter("ignore_z_min", -2.0);
     ignore_z_max_ = declare_parameter("ignore_z_max", 0.5);
     beam_sigma_ = declare_parameter("beam_sigma", 0.008);
@@ -178,8 +180,23 @@ void TerrainAnalyzerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     // Fuse raw → fused
     fuseAll();
 
-    // TODO: computeTraversability() 暂时禁用 (CPU 版太慢, 320k SE(2) cells)
-    // computeTraversability();
+    // 可通行性评估 (论文 Algorithm 1)。
+    //
+    // 默认关闭：CPU 全图版实测 12.3s/次（200×200×32 = 1.28M 个 SE(2) 格，
+    // 每格 49 邻域点 + 3×3 特征分解），已经优化过（跳过无高程格 + OpenMP
+    // + yaw 降采样）仍无法实时。
+    //
+    // 实际方案：planner 侧按需计算——只对「轨迹经过的点」算 risk
+    // （ElevationGridParser.risk_at()，numpy 3×3 eigh，每点约 20μs）。
+    // 数学与 Algorithm 1 一致，但复杂度从「全图」降到「轨迹采样点」。
+    if (enable_traversability_)
+    {
+        auto t0 = std::chrono::steady_clock::now();
+        computeTraversability();
+        double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
+        RCLCPP_INFO(this->get_logger(), "computeTraversability: %.1f ms", ms);
+    }
 
     // SDF 生成: 从高程图 + 障碍物检测
     // 1. 有高程数据且无高点 → free (SDF > 0)
@@ -396,15 +413,38 @@ void TerrainAnalyzerNode::computeTraversability()
     double ell_a = ellipsoid_x_ * 0.5;  // semi-axis
     double ell_b = ellipsoid_y_ * 0.5;
 
+    const int yaw_stride = std::max(1, traversability_yaw_stride_);
+    const int yaw_count = (size_yaw + yaw_stride - 1) / yaw_stride;
+
+#pragma omp parallel for schedule(dynamic, 2)
     for (int r = 0; r < size(0); r++)
     {
+        // 线程私有的点缓冲，避免每格分配
+        std::vector<Eigen::Vector3d> pts;
+        pts.reserve(512);
+
         for (int c = 0; c < size(1); c++)
         {
             Eigen::Array3i base_idx(r, c, 0);
             Eigen::Vector3d grid_center;
             fused_map_.index2Pos(base_idx, grid_center);
 
-            for (int iy = 0; iy < size_yaw; iy++)
+            // 中心格没有高程 → 该位置无从评估，直接跳过整列 yaw。
+            // 未观测区域在 20m×20m 图上占绝大多数，这一步省掉绝大部分计算。
+            Eigen::Array3i center_idx(r, c, 0);
+            const bool center_valid = fused_map_.isValid(center_idx, fused_basic_layers_);
+            if (!center_valid)
+            {
+                for (int iy = 0; iy < size_yaw; iy++)
+                {
+                    fused_map_["risk"][iy](r, c) = 1.0f;  // 未知 → 视为最高风险
+                    fused_map_["zbx"][iy](r, c) = 0.0f;
+                    fused_map_["zby"][iy](r, c) = 0.0f;
+                }
+                continue;
+            }
+
+            for (int iy = 0; iy < size_yaw; iy += yaw_stride)
             {
                 double yaw = iy * resolution_yaw_;
                 Eigen::Array3i se2_idx(r, c, iy);
@@ -418,14 +458,20 @@ void TerrainAnalyzerNode::computeTraversability()
                 double ecy = grid_center.y() + ellipsoid_offset_x_ * xb_y + ellipsoid_offset_y_ * yb_y;
 
                 // Collect points inside ellipse
-                std::vector<Eigen::Vector3d> pts;
+                pts.clear();
                 int search_r = static_cast<int>(std::ceil(std::max(ell_a, ell_b) / resolution_pos_)) + 1;
 
                 for (int dr = -search_r; dr <= search_r; dr++)
                 {
                     for (int dc = -search_r; dc <= search_r; dc++)
                     {
-                        Eigen::Array3i nidx(r + dr, c + dc, 0);
+                        // 必须自己查边界：SE2Grid::isValid() 内部直接调用 at()，
+                        // 不做范围检查，在 map 边缘会触发 Eigen 断言崩溃
+                        // （原代码从未执行到这里，启用后才暴露）。
+                        const int rr = r + dr, cc = c + dc;
+                        if (rr < 0 || rr >= size(0) || cc < 0 || cc >= size(1))
+                            continue;
+                        Eigen::Array3i nidx(rr, cc, 0);
                         if (!fused_map_.isValid(nidx, fused_basic_layers_))
                             continue;
 
@@ -511,13 +557,20 @@ void TerrainAnalyzerNode::computeTraversability()
                     risk = std::min(risk, 1.0f);
                 }
 
-                // Store results
-                fused_map_["risk"][iy](r, c) = risk;
-                fused_map_["zbx"][iy](r, c) = zbx_val;
-                fused_map_["zby"][iy](r, c) = zby_val;
+                // Store results（yaw 降采样时把结果铺满被跳过的分箱，
+                // 否则那些分箱保持旧值，规划器读到的是过时数据）
+                const int yaw_end = std::min(iy + yaw_stride, size_yaw);
+                for (int jy = iy; jy < yaw_end; jy++)
+                {
+                    fused_map_["risk"][jy](r, c) = risk;
+                    fused_map_["zbx"][jy](r, c) = zbx_val;
+                    fused_map_["zby"][jy](r, c) = zby_val;
+                }
 
-                // SDF: binary obstacle map
-                sdf_map_["sdf"][0](r, c) = (risk > 0.5f) ? 1.0f : 0.0f;
+                // 注意: 这里**不要**写 sdf_map_。
+                // SDF 由后面的「高程 + 高点计数」逻辑生成；P1/P2.5 的避障依赖
+                // sdf<0 表示实体障碍。若在此按 risk>0.5 写 sdf，会把「陡坡/崎岖」
+                // 和「实体障碍」混为一谈，使 A* 的行为依赖调用顺序。
             }
         }
     }

@@ -71,6 +71,10 @@ private:
     double max_curvature_ = 1000.0;
     double weight_phi_ = 0.2;
     double weight_curvature_ = 0.6;
+    // yaw 分箱降采样步长：1=全部计算；2/4 可成倍加速，跳过的分箱用邻近值填充
+    int traversability_yaw_stride_ = 1;
+    // 全图 SE(2) risk 计算开关（默认关，实测 12s/次不可实时）
+    bool enable_traversability_ = false;
     double ignore_z_min_ = -2.0;
     double ignore_z_max_ = 0.5;
     double beam_sigma_ = 0.008;

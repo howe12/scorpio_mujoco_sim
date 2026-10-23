@@ -27,6 +27,14 @@ terrain_analyzer:
     max_curvature: 1000.0
     weight_phi: 0.2
     weight_curvature: 0.6
+    # yaw 分箱降采样: 1=全部 32 个朝向; 4=每 4 个算一个(其余用邻近值填充)
+    # 32 个朝向的完整 SE(2) 评估在 CPU 上太慢, 规划主要关心少数朝向外加
+    # 各向同性的坡度项, 降采样后精度损失可接受
+    traversability_yaw_stride: 4
+    # 全图 SE(2) risk 计算: 实测 12.3s/次(1.28M 格 × 49 邻域 × 特征分解),
+    # 无法实时。planner 侧改为按需算轨迹点的 risk(ElevationGridParser.risk_at),
+    # 数学等价但只算几十个点。需要离线生成完整 risk 图时才置 true。
+    enable_traversability: false
 
     # Height filter (body frame)
     ignore_z_min: -3.0

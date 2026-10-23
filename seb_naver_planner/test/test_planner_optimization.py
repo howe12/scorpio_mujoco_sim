@@ -73,6 +73,9 @@ class FakeNode:
         "max_pitch_deg": 20.0,
         "max_roll_deg": 15.0,
         "attitude_tolerance": 1.3,
+        "risk_limit": 0.8,
+        "risk_soft_limit": 0.5,
+        "risk_astar_weight": 1.0,
     }
 
     def __init__(self):

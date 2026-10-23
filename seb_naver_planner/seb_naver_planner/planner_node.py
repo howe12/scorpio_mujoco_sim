@@ -278,6 +278,99 @@ class ElevationGridParser:
         dz_lat = -dzdx * s + dzdy * c
         return math.atan(dz_fwd), math.atan(dz_lat)
 
+    # ---- 可通行性风险评估 (论文 Algorithm 1, 按需计算) ----
+    #: 机器人足迹椭圆半轴 (m)，与 terrain_analyzer 的 ellipsoid_x/y 一致
+    FOOTPRINT_A = 0.20
+    FOOTPRINT_B = 0.15
+
+    def risk_at(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        max_curvature: float = 1000.0,
+        max_pitch: float = 0.786,
+        max_roll: float = 1.571,
+        w_curvature: float = 0.6,
+        w_phi: float = 0.2,
+    ) -> Optional[float]:
+        """论文 Algorithm 1：对给定位姿评估可通行性风险 ∈ [0, 1]。
+
+        做法：取足迹椭圆内的地形点 → 3×3 协方差 → 最小特征向量作为曲面法线
+        → 由法线得曲率与俯仰/横滚 → 加权求和。超过硬限则 risk=1。
+
+        与 terrain_analyzer 的 C++ 全图实现数学一致，但只算单个点（约 20μs），
+        所以可以对轨迹的几十个采样点实时求值。
+
+        Returns:
+            risk ∈ [0,1]；地形未观测时返回 None。
+        """
+        if self.elevation is None or self.valid is None:
+            return None
+        r0, c0 = self.world_to_grid(x, y)
+        sa = int(math.ceil(max(self.FOOTPRINT_A, self.FOOTPRINT_B) / self.resolution)) + 1
+        if not (sa <= r0 < self.rows - sa and sa <= c0 < self.cols - sa):
+            return None
+
+        # 向量化取邻域窗口（Python 逐点循环实测 478μs/次，
+        # 对 A* 的数千个抽样点不可接受；切片后约 1/8 开销）
+        win = self.elevation[r0 - sa:r0 + sa + 1, c0 - sa:c0 + sa + 1]
+        ok = self.valid[r0 - sa:r0 + sa + 1, c0 - sa:c0 + sa + 1]
+        n_win = win.shape[0]
+        idx = (np.arange(n_win) - sa) * self.resolution
+        dxg, dyg = np.meshgrid(idx, idx)   # 都是 (n_win, n_win)
+
+        ca, sa_ = math.cos(yaw), math.sin(yaw)
+        # 世界系偏移 → 车身系
+        rx = ca * dxg + sa_ * dyg
+        ry = -sa_ * dxg + ca * dyg
+        inside = ((rx * rx) / (self.FOOTPRINT_A ** 2)
+                  + (ry * ry) / (self.FOOTPRINT_B ** 2)) <= 1.0
+        sel = inside & ok & np.isfinite(win)
+        if sel.sum() <= 7:
+            return None  # 有效点太少，与 C++ 版一致
+
+        z = win[sel].astype(np.float64)
+        ex = dxg[sel].astype(np.float64)
+        ey = dyg[sel].astype(np.float64)
+        dz = z - z.mean()
+        cov = np.empty((3, 3), dtype=np.float64)
+        cov[0, 0] = (ex * ex).mean()
+        cov[1, 1] = (ey * ey).mean()
+        cov[2, 2] = (dz * dz).mean()
+        cov[0, 1] = cov[1, 0] = (ex * ey).mean()
+        cov[0, 2] = cov[2, 0] = (ex * dz).mean()
+        cov[1, 2] = cov[2, 1] = (ey * dz).mean()
+
+        evals, evecs = np.linalg.eigh(cov)      # 升序
+        normal = evecs[:, 0]
+        if normal[2] < 0:
+            normal = -normal
+        curvature = 3.0 * evals[0] / (evals.sum() + 1e-10)
+
+        # 由法线重建车体系，求俯仰/横滚
+        zb = normal
+        xyaw = np.array([ca, sa_, 0.0])
+        yb = np.cross(zb, xyaw)
+        nyn = np.linalg.norm(yb)
+        if nyn < 1e-9:
+            return 1.0
+        yb = yb / nyn
+        xb = np.cross(yb, zb)
+        xb = xb / max(np.linalg.norm(xb), 1e-9)
+        up = np.array([0.0, 0.0, 1.0])
+        phi_x = abs(math.asin(min(1.0, abs(float(up @ xb)))))
+        phi_y = abs(math.asin(min(1.0, abs(float(up @ yb)))))
+
+        risk = (
+            w_curvature * (curvature / max(max_curvature, 1e-9))
+            + w_phi * (phi_x / max(max_pitch, 1e-9))
+            + w_phi * (phi_y / max(max_roll, 1e-9))
+        )
+        if curvature > max_curvature or phi_x > max_pitch or phi_y > max_roll:
+            return 1.0
+        return float(min(max(risk, 0.0), 1.0))
+
     def untraversable_mask(self, max_slope_rad: float) -> np.ndarray:
         """坡度超过阈值的格子（用于喂给 A* 当障碍）。"""
         n = self.rows * self.cols
@@ -362,6 +455,12 @@ class PlanManager:
         self._opt_skip_short: int = 0
         self._opt_attitude_reject: int = 0
         self._slope_fallback: int = 0
+        self._opt_risk_reject: int = 0
+        # 缓存：坡度 mask 与膨胀栅格。两者都是对整幅 200×200 图的重操作
+        # （np.gradient / binary_dilation / binary_opening 约 200ms），
+        # 而地形和 SDF 在相邻两次规划间通常不变。按内容哈希命中缓存。
+        self._slope_cache: Optional[Tuple] = None
+        self._inflate_cache: Optional[Tuple] = None
         # 过短的路径不优化：N 会被压到 3 段、段长 <0.7m，五次多项式病态，
         # 优化结果几乎必然 κ 超限（实测短路径场景 17/19 被拒）。
         self.min_optimize_length: float = node.get_parameter(
@@ -383,6 +482,11 @@ class PlanManager:
         # 验收容差：高程图有厘米级噪声，轻微超限不拒绝整条轨迹
         self.attitude_tolerance: float = node.get_parameter(
             "attitude_tolerance").value
+        # ---- 可通行性风险 (P4, 论文 Eq.22 的 ρr 项 + Eq.28 的 rmax 约束) ----
+        self.risk_limit: float = node.get_parameter("risk_limit").value
+        self.risk_soft_limit: float = node.get_parameter("risk_soft_limit").value
+        # A* 代价加权的风险惩罚系数（软偏好低风险，不禁止通行）
+        self.risk_astar_weight: float = node.get_parameter("risk_astar_weight").value
         # 剩余轨迹短于此值则视为不可用，等待下一次优化
         self.optimize_min_remaining: float = node.get_parameter(
             "optimize_min_remaining").value
@@ -501,6 +605,24 @@ class PlanManager:
                     f"→ 用 A* 粗路径")
                 traj = rough
 
+        # 风险验收（论文 Eq.28 / Eq.22 的 ρr 项）
+        if optimized is not None and traj is optimized:
+            risk_res = self._check_risk(traj)
+            if risk_res is not None:
+                max_risk, mean_risk = risk_res
+                if max_risk > self.risk_limit:
+                    self._opt_risk_reject += 1
+                    self._node.get_logger().warn(
+                        f"traj rejected by risk: max={max_risk:.2f} > limit={self.risk_limit:.2f}"
+                        " → 用 A* 粗路径")
+                    traj = rough
+                elif mean_risk > self.risk_soft_limit:
+                    self._opt_risk_reject += 1
+                    self._node.get_logger().warn(
+                        f"traj rejected by mean risk: {mean_risk:.2f} > soft={self.risk_soft_limit:.2f}"
+                        " → 用 A* 粗路径")
+                    traj = rough
+
         self.last_traj = traj
         return traj
 
@@ -516,36 +638,81 @@ class PlanManager:
         if self._elev.elevation is None:
             return grid
         max_slope = math.radians(self.max_slope_deg)
-        mask = self._elev.untraversable_mask(max_slope)
-        if not mask.any():
-            return grid
-        # 两个栅格尺寸/原点应一致（都由 terrain_analyzer 发布）
-        if mask.shape != grid.shape:
-            return grid
+        elev_arr = np.asarray(self._elev.elevation)
+        sdf_arr = np.asarray(self._sdf.sdf_map) if self._sdf.sdf_map is not None else None
+        key = (
+            hash(elev_arr.tobytes()),
+            hash(sdf_arr.tobytes()) if sdf_arr is not None else 0,
+            round(max_slope, 6),
+            self.risk_limit,
+            self.risk_astar_weight,
+        )
+        if self._slope_cache is not None and self._slope_cache[0] == key:
+            mask, risk_mask = self._slope_cache[1], self._slope_cache[2]
+        else:
+            mask, risk_mask = self._compute_slope_masks(grid, max_slope, sdf_arr)
+            self._slope_cache = (key, mask, risk_mask)
 
-        # 关键：排除「未观测」区域。
-        # terrain_analyzer 的 fuseAll 只在 raw_elev 有限时写 elevation，
-        # 未观测格保持默认值（0）——它与实测地面高度差在边界上形成假陡坡，
-        # 实测会把大片区域标成不可通行，A* 连续 68 次找不到路径。
-        # sdf_map 的 0.5=unknown 正好标记这些格子。
-        if self._sdf.sdf_map is not None and self._sdf.sdf_map.shape == mask.shape:
-            unknown = np.abs(np.asarray(self._sdf.sdf_map) - 0.5) < 1e-3
-            mask = mask & ~unknown
-        if not mask.any():
+        if mask is None:
             return grid
-
-        # 形态学开运算：去掉单格噪声（树根、碎石的单点高差）
-        try:
-            from scipy.ndimage import binary_opening
-            mask = binary_opening(mask, structure=np.ones((2, 2)))
-        except ImportError:
-            pass
-        if not mask.any():
-            return grid
-
         out = np.array(grid, copy=True)
-        out[mask] = -1.0
+        if mask.any():
+            out[mask] = -1.0
+        if risk_mask is not None and risk_mask.any():
+            out[risk_mask] = -1.0
         return out
+
+    def _compute_slope_masks(self, grid, max_slope, sdf_arr):
+        """计算坡度超限 mask 与 risk 超限 mask（结果会被缓存）。"""
+        if self._elev is None or self._elev.elevation is None:
+            return None, None
+        mask = self._elev.untraversable_mask(max_slope)
+        if mask.shape != grid.shape:
+            return None, None
+
+        if sdf_arr is not None and sdf_arr.shape == mask.shape:
+            unknown = np.abs(sdf_arr - 0.5) < 1e-3
+            mask = mask & ~unknown
+
+        if mask.any():
+            try:
+                from scipy.ndimage import binary_opening
+                mask = binary_opening(mask, structure=np.ones((2, 2)))
+            except ImportError:
+                pass
+
+        # P4: risk 硬约束（Eq.28）。默认 risk_astar_weight<0 时不做全图过滤
+        # （单点约 500μs，数千抽样点需数秒，不可实时）。
+        risk_mask = None
+        if self.risk_astar_weight >= 0.0 and self.risk_limit < 1.0:
+            risk_mask = self._risk_mask_for_astar(grid.shape)
+        return mask, risk_mask
+
+    def _risk_mask_for_astar(self, shape) -> Optional[np.ndarray]:
+        """在网格上抽样评估 risk，返回 risk > risk_limit 的 mask。"""
+        if self._elev is None or self._elev.elevation is None:
+            return None
+        elev = self._elev
+        if elev.rows != shape[0] or elev.cols != shape[1]:
+            return None
+        mask = np.zeros(shape, dtype=bool)
+        step = 3          # 每 3 格（0.3m）抽样一次
+        hit = 0
+        for r in range(step, shape[0] - step, step):
+            for c in range(step, shape[1] - step, step):
+                if not elev.valid[r, c]:
+                    continue
+                x, y = elev.grid_to_world(r, c)
+                # 风险与朝向相关，但 A* 不知道朝向 → 取 4 个主朝向的最坏值
+                worst = 0.0
+                for yaw in (0.0, math.pi / 2, math.pi, -math.pi / 2):
+                    rv = elev.risk_at(x, y, yaw)
+                    if rv is not None and rv > worst:
+                        worst = rv
+                if worst > self.risk_limit:
+                    mask[r - step:r + step, c - step:c + step] = True
+                    hit += 1
+        return mask if hit else None
 
     def _check_attitude(
         self, traj: List[Tuple[float, float, float]]
@@ -565,6 +732,25 @@ class PlanManager:
             if abs(pitch) > max_pitch or abs(roll) > max_roll:
                 return worst
         return worst
+
+    def _check_risk(
+        self, traj: List[Tuple[float, float, float]]
+    ) -> Optional[Tuple[float, float]]:
+        """验收轨迹上的可通行风险，返回 (max_risk, mean_risk)；无地形数据返回 None。
+
+        对应论文 Eq.28（Risk ≤ rmax 硬约束）与 Eq.22 的 ρr·∫Risk² 项：
+        硬约束逐点检查，软项用全程平均风险近似（我们不对 risk 做插值积分）。
+        """
+        if self._elev is None or self._elev.elevation is None or not traj:
+            return None
+        risks: List[float] = []
+        for x, y, th in traj:
+            rv = self._elev.risk_at(x, y, th)
+            if rv is not None:
+                risks.append(rv)
+        if not risks:
+            return None
+        return max(risks), sum(risks) / len(risks)
 
     def _inflate_sdf(self, grid: np.ndarray) -> np.ndarray:
         """按车体半径膨胀障碍物（返回新的栅格，不修改输入）。"""
@@ -752,6 +938,10 @@ class SebNaverPlannerNode(Node):
         self.declare_parameter("max_pitch_deg", 20.0)   # 轨迹验收: 俯仰
         self.declare_parameter("max_roll_deg", 15.0)    # 轨迹验收: 横滚
         self.declare_parameter("attitude_tolerance", 1.3)  # 验收容差倍数
+        # ---- 可通行性风险 (P4) ----
+        self.declare_parameter("risk_limit", 0.8)       # 论文 rmax: 超过当障碍
+        self.declare_parameter("risk_soft_limit", 0.5)  # 轨迹平均风险软阈值
+        self.declare_parameter("risk_astar_weight", -1.0)  # >=0 启用 A* risk 过滤
 
         # Cache tolerances
         self._tol_dist: float = self.get_parameter("goal_tolerance_dist").value

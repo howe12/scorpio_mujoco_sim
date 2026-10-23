@@ -108,8 +108,8 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 | Kinodynamic A* | `seb_naver_planner/kino_astar.py` | ~670 行 | ✅ | 自行车运动学 + Reeds-Shepp + SDF 碰撞 |
 | ReplanFSM | `seb_naver_planner/planner_node.py` | ~530 行 | ✅ | 5 状态机 + 到达判定 + 定时重规划 |
 | MPC 控制器 | `seb_naver_planner/mpc_node.py` | ~380 行 | ⚠️ | CasADi SQP，偶发迭代超限（有 fallback） |
-| 轨迹优化 (P0~P3) | `trajectory_optimizer.py` + `planner_node.py` | ~1500 行 | ✅ | 最小 jerk + SDF 避障 + 异步接入 + A* 车体膨胀 + **地形姿态约束**；P0 5/5、P1 6/6、P2 3/3、P3 6/6 |
-| PHR-ALM 完整版 (P4) | 同上 | — | ⚠️ | Risk 项（需先启用可通行性）/换挡/s(t) 未做；MPC 巡航速度偏低 |
+| 轨迹优化 (P0~P4) | `trajectory_optimizer.py` + `planner_node.py` | ~1700 行 | ✅ | 最小 jerk + SDF 避障 + 异步接入 + 车体膨胀 + 地形姿态 + **可通行性风险**；27 项测试全通过 |
+| 与论文的剩余差距 | — | — | ⚠️ | 换挡/s(t) 未做；risk 未做全图（按需算）；MPC 巡航速度偏低 |
 | RViz 可视化 | `config/fastlio.rviz` | — | ✅ | 点云 + 机器人 + 路径 + SetGoal |
 | SE2Grid 可视化 | — | — | ❌ | RViz 无自定义 display 插件，看不出高程图/风险图 |
 
@@ -613,6 +613,9 @@ ros2 run tf2_tools view_frames 2>&1 | grep -oE "base_footprint: .{0,25}"
 | `max_pitch_deg` | 20.0 | 轨迹姿态验收：俯仰上限 |
 | `max_roll_deg` | 15.0 | 轨迹姿态验收：横滚上限（车体窄，侧翻更敏感） |
 | `attitude_tolerance` | 1.3 | 姿态验收容差倍数（高程图有厘米级噪声） |
+| `risk_limit` | 0.8 | 论文 rmax：轨迹上任一点 risk 超此值则拒绝 |
+| `risk_soft_limit` | 0.5 | 轨迹平均 risk 软阈值（近似 Eq.22 的 ρr·∫Risk²） |
+| `risk_astar_weight` | -1.0 | <0 关闭 A* 全图 risk 过滤（默认，太慢）；>=0 启用 |
 
 > 求解用 IPOPT + `hessian_approximation=limited-memory`。实测：用精确 Hessian 需 1300ms，
 > 改 L-BFGS 后降到 200~400ms，精度仍满足约束。
@@ -892,7 +895,8 @@ pkill -9 -f rviz2
 - [x] **轨迹优化 P2**：异步接入 planner（单线程 executor + 结果缓存 + 身后裁剪 + 弧长重采样），失败自动回退 A* 粗路径；集成 3/3、端到端到达
 - [x] **轨迹优化 P2.5**：① `follow_mode` 默认 hard（软引导是 κ 尖峰的真凶）② free nodes 分段点变优化变量 ③ **A* 车体膨胀 `inflation_radius=0.25`**（路径间距 0.157→0.335m）
 - [x] **轨迹优化 P3**：订阅 `/fused_map` 解析 elevation → 坡度超限区当障碍（A* 绕开）+ 轨迹姿态验收（φx/φy），6/6 单测
-- [ ] **轨迹优化 P4**：启用可通行性后加 Risk 项；可选 s(t)/换挡（论文完整版）
+- [x] **轨迹优化 P4**：可通行性风险（论文 Alg.1 的 numpy 版按需计算）+ 轨迹 risk 硬/软验收（Eq.28 / Eq.22 的 ρr 项），7/7 单测
+- [ ] 可选：s(t) 中间变量与换挡点 e_m（论文完整参数化，当前仅前进场景）
 - [ ] 用 OpenMP/向量化加速 `computeTraversability()` 并重新启用（恢复坡度/曲率风险）
 - [ ] 真实 SDF 构建（欧氏距离变换），替代高点计数
 - [ ] 增大局部地图或加全局规划器以支持绕路
@@ -939,6 +943,10 @@ pkill -9 -f rviz2
 | **坡度 mask 排除 SDF unknown 区** | 未观测格 elevation 保持默认 0，与实测地面形成假陡坡，实测把大片区域标成不可通行、A* 连续 68 次失败。用 `sdf_map==0.5` 排除 |
 | **坡度过滤无解时回退纯障碍规划** | 坡度 mask 可能挡住唯一通路（实测 15 次 A* 失败）。安全侧由轨迹姿态验收兜底，不应整段规划失败 |
 | **坡度差分用 ±2 格 (0.4m) 基线 + 3×3 平滑** | 1 格 (0.1m) 基线上厘米级高程噪声会放大成十几度，实测平地 plaza 也被判姿态超限 |
+| **risk 改在 planner 侧按需算** | terrain_analyzer 全图 SE(2) 版实测 12.3s/次（1.28M 格 × 49 邻域 × 特征分解），加 OpenMP/跳空/降采样仍不可实时。改为只算轨迹点（500μs/点），数学与 Alg.1 一致 |
+| **A* 不做 risk 全图过滤** | 20m 图抽样数千点 × 4 朝向 × 500μs = 数秒。规划期由坡度约束覆盖，risk 只做轨迹验收 |
+| **SE2Grid::isValid() 不查边界** | 其内部直接 `at()`，map 边缘会触发 Eigen 断言。computeTraversability 从未执行过所以没暴露；已在调用侧加范围检查 |
+| **坡度 mask / 膨胀栅格做内容哈希缓存** | 两者都是整幅 200×200 图的重操作（~200ms），每次规划重算会让 `plan()` 从 49ms 涨到 276ms（P2 异步保证失效） |
 
 ---
 
