@@ -24,7 +24,7 @@ seb_naver_planner:
 
     # Goal tolerance (航向容差放宽: 避免到达附近反复调整)
     goal_tolerance_dist: 0.8
-    goal_tolerance_yaw: 0.3
+    goal_tolerance_yaw: 0.5    # 29°：MPC 只跟踪位置，末端朝向不应作为硬指标
     goal_tolerance_vel: 0.05
     # 重规划间隔: 0.5→1.0s (减少路径频繁变化, 转弯更稳定)
     replan_interval: 1.0
@@ -70,7 +70,10 @@ mpc_controller:
     dt: 0.05
     # 位置权重 (x,y) 高, 航向权重 Q[2] 需足够大才能平滑转弯.
     # Q[2]=0.5 太低 → MPC 几乎忽略航向误差 → 大半径弧线/过冲 → 转弯差
-    Q: [10.0, 10.0, 2.0]
+    # Q = [x, y, yaw] 权重。yaw 原为 2.0，远低于位置(10)，而转向变化代价
+    # Rd=[5,3] 又很贵 → MPC 判定"为了消 20° 朝向误差不值得转"，实测停车时
+    # 朝向误差达 24°，导致 5 个目标 0 次满足 goal_tolerance_yaw。
+    Q: [10.0, 10.0, 4.0]
     R: [3.0, 3.0]
     # 转向变化率惩罚压低, 转弯更灵活 (原 10 过硬, 转弯僵直)
     Rd: [5.0, 3.0]
