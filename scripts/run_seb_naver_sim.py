@@ -404,6 +404,15 @@ def run_interactive(terrain_name, enable_ros2=False, publish_images=False, headl
             cmd_vel[1] = msg.angular.z
         ros2_pub.node.create_subscription(Twist, '/cmd_vel', cmd_vel_cb, 10)
 
+    # ---- 实时配速 ----
+    # 原实现每轮只 mj_step 一次 (1 ms 仿真) 再发布整套传感器, 实测主循环
+    # 417 Hz → 实时因子只有 0.42: 机器人命令 0.5 m/s, 墙钟上只看到 0.21 m/s,
+    # 评估指标全部被低估。这里改为「按墙钟补足物理步, 每轮只发布一次」,
+    # 使仿真时间跟住真实时间。
+    rt_factor = 1.0        # 目标实时因子 (>1 快放, <1 慢放)
+    max_catchup = 200      # 单轮最多补的物理步数, 防止卡顿后疯狂追帧
+    wall_t0 = time.perf_counter()
+    sim_t0 = data.time
     running = True
     while running:
         if headless:
@@ -422,7 +431,14 @@ def run_interactive(terrain_name, enable_ros2=False, publish_images=False, headl
             data.ctrl[1] = wheel_speed
             data.ctrl[2] = steer_angle
 
-            mujoco.mj_step(model, data)
+            # 补足物理步, 让 data.time 跟上 墙钟 × rt_factor
+            target_sim = sim_t0 + (time.perf_counter() - wall_t0) * rt_factor
+            n_step = 0
+            while data.time < target_sim and n_step < max_catchup:
+                mujoco.mj_step(model, data)
+                n_step += 1
+            if n_step == 0:
+                mujoco.mj_step(model, data)   # 至少推进一步, 避免空转
 
             # 发布 ROS2
             if ros2_pub is not None:

@@ -284,6 +284,8 @@ class MPCController(Node):
         v_cruise = min(self.max_speed, math.sqrt(2.0 * 0.8 * max(dist_end, 0.0)))
         v_cruise = max(v_cruise, 0.0)
         u_ref[:, 0] = v_cruise
+        self._trace_vref = v_cruise
+        self._trace_dend = dist_end
         opti.set_value(self.U_ref_param, u_ref)
 
         # Previous control for rate penalty
@@ -347,12 +349,13 @@ class MPCController(Node):
             "TRACE st=(%.2f,%.2f,%.0fdeg) traj_len=%d idx=%d "
             "ref0=(%.2f,%.2f,%.0fdeg) refEnd=(%.2f,%.2f,%.0fdeg) dEnd=%.2f "
             "fwd[0,mid,last]=(%.2f,%.2f,%.2f) lat_absmax=%.2f "
-            "u_opt=(%.3f,%.3f) out=(%.3f,%.3f) w=%.3f"
+            "vref=%.3f u_opt=(%.3f,%.3f) out=(%.3f,%.3f) w=%.3f"
             % (st[0], st[1], math.degrees(st[2]), traj_len, start_idx,
                X_ref[0, 0], X_ref[0, 1], math.degrees(X_ref[0, 2]),
                end[0], end[1], math.degrees(end[2]), d_end,
                fwd[0], fwd[len(fwd) // 2], fwd[-1],
                max(abs(x) for x in lat),
+               getattr(self, '_trace_vref', float('nan')),
                u0[0], u0[1], v_cmd, delta_cmd,
                v_cmd * math.tan(delta_cmd) / self.wheelbase))
 

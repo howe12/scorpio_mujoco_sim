@@ -200,14 +200,20 @@ class ScorpioROS2Publisher:
         angles = np.linspace(-np.pi, np.pi, self.LIDAR_NUM_POINTS, endpoint=False)
         ranges = np.full(self.LIDAR_NUM_POINTS, np.inf, dtype=np.float32)
 
-        for i, ang in enumerate(angles):
-            direction = site_mat @ np.array([np.cos(ang), np.sin(ang), 0.0])
-            geom_id = np.array([-1], dtype=np.int32)
-            dist = mujoco.mj_ray(self.model, self.data, site_pos, direction,
-                                 self._geomgroup, 1, self._lidar_body_id, geom_id)
-            if dist >= 0:
-                ranges[i] = np.clip(dist, self.LIDAR_MIN_RANGE, self.LIDAR_MAX_RANGE)
-
+        # 批量投射（与 3D 点云同理，避免逐射线 Python→C 调用）
+        dirs_local = np.stack([np.cos(angles), np.sin(angles),
+                               np.zeros_like(angles)], axis=-1)
+        dirs_world = dirs_local @ site_mat.T
+        nray = dirs_world.shape[0]
+        dist = np.full(nray, -1.0, dtype=np.float64)
+        geomid = np.full(nray, -1, dtype=np.int32)
+        mujoco.mj_multiRay(
+            self.model, self.data, site_pos, np.ascontiguousarray(dirs_world.reshape(-1)),
+            self._geomgroup, 1, self._lidar_body_id, geomid, dist, None,
+            nray, float(self.LIDAR_MAX_RANGE),
+        )
+        hit = dist >= 0
+        ranges[hit] = np.clip(dist[hit], self.LIDAR_MIN_RANGE, self.LIDAR_MAX_RANGE)
         return ranges
 
     # ---- 3D LiDAR ----
@@ -234,35 +240,44 @@ class ScorpioROS2Publisher:
         result = np.zeros(max_pts, dtype=self._cloud_dtype)
         count = 0
 
-        for vi in range(v_lines):
-            base_v = v_min + (v_max - v_min) * vi / max(v_lines - 1, 1)
+        # ---- 批量射线投射 (mj_multiRay) ----
+        # 原实现逐射线调用 mj_ray: 32×360 = 11520 次 Python→C 调用，单帧约 200ms，
+        # 把主循环拖到 4.8Hz，导致 /odom 频率不足、实时因子只有 0.42。
+        # 改为一次批量调用。
+        v_angs = np.linspace(v_min, v_max, v_lines)
+        h_angs = -np.pi + 2.0 * np.pi * np.arange(h_res) / h_res
+        VV, HH = np.meshgrid(v_angs, h_angs, indexing='ij')      # (v_lines, h_res)
+        dirs_local = np.stack([np.cos(VV) * np.cos(HH),
+                               np.cos(VV) * np.sin(HH),
+                               np.sin(VV)], axis=-1).reshape(-1, 3)
+        dirs_world = dirs_local @ site_mat.T                     # (nray, 3) 世界系
+        nray = dirs_world.shape[0]
 
-            for hi in range(h_res):
-                h_ang = -np.pi + 2.0 * np.pi * hi / h_res
-                v_ang = base_v
+        dist = np.full(nray, -1.0, dtype=np.float64)
+        geomid = np.full(nray, -1, dtype=np.int32)
+        mujoco.mj_multiRay(
+            self.model, self.data, site_pos, np.ascontiguousarray(dirs_world.reshape(-1)),
+            self._geomgroup, 1, self._lidar_body_id, geomid, dist, None,
+            nray, float(self.LIDAR3D_MAX_RANGE),
+        )
 
-                # 球坐标 → 方向向量 (lidar frame: +X forward, +Y left, +Z up)
-                dx = np.cos(v_ang) * np.cos(h_ang)
-                dy = np.cos(v_ang) * np.sin(h_ang)
-                dz = np.sin(v_ang)
-                direction = site_mat @ np.array([dx, dy, dz])
-
-                geom_id = np.array([-1], dtype=np.int32)
-                dist = mujoco.mj_ray(self.model, self.data, site_pos, direction,
-                                     self._geomgroup, 1, self._lidar_body_id, geom_id)
-                if dist >= 0 and self.LIDAR3D_MIN_RANGE <= dist <= self.LIDAR3D_MAX_RANGE:
-                    local_pt = site_mat.T @ (direction * dist)
-                    # time 固定为 0.001s (所有点相同):
-                    # MuJoCo mj_ray 是瞬时投射, 所有点同一时刻, 不该做运动去畸变.
-                    # 设 time=0 会让 FAST-LIO2 velodyne_handler 走 given_offset_time=false
-                    # 分支, 从 yaw 角度自行计算每点"时间"→ 不同点时间戳不同 → 运动补偿
-                    # 引入错误畸变 → 漂移. 设统一正值则 given_offset_time=true 且所有点
-                    # curvature 相同 → 等效不去畸变 (点本来就是瞬时采样的).
-                    intensity = max(0.0, min(255.0, 200.0 * (1.0 - dist / self.LIDAR3D_MAX_RANGE)))
-
-                    result[count] = (local_pt[0], local_pt[1], local_pt[2],
-                                     intensity, 0.001, vi, 0)
-                    count += 1
+        mask = (dist >= self.LIDAR3D_MIN_RANGE) & (dist <= self.LIDAR3D_MAX_RANGE)
+        if np.any(mask):
+            idx = np.nonzero(mask)[0]
+            d_m = dist[mask]
+            world_vec = dirs_world[mask] * d_m[:, None]
+            local_pts = world_vec @ site_mat                       # R^T v
+            intensity = np.clip(200.0 * (1.0 - d_m / self.LIDAR3D_MAX_RANGE), 0.0, 255.0)
+            ring = (idx // h_res).astype(np.uint16)
+            n = idx.size
+            result[:n]['x'] = local_pts[:, 0]
+            result[:n]['y'] = local_pts[:, 1]
+            result[:n]['z'] = local_pts[:, 2]
+            result[:n]['intensity'] = intensity
+            # time 固定 0.001s: 所有点同一时刻采样，避免 FAST-LIO2 做去畸变
+            result[:n]['time'] = 0.001
+            result[:n]['ring'] = ring
+            count = n
 
         return result[:count]
 
