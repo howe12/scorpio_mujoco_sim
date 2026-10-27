@@ -1,0 +1,86 @@
+{
+  "terrain": "plaza",
+  "n_runs": 15,
+  "n_goals": 5,
+  "summary": {
+    "success": 15,
+    "success_rate": 1.0,
+    "time_mean": 17.92,
+    "speed_mean": 0.1757,
+    "collisions": 0,
+    "max_time_cv": 0.1,
+    "variance_ok": true
+  },
+  "per_goal": [
+    {
+      "goal": [
+        1.5,
+        -1.5
+      ],
+      "n": 3,
+      "success": 3,
+      "time_mean": 12.4,
+      "time_std": 0.2,
+      "time_cv": 0.016,
+      "final_dist_mean": 0.566,
+      "speed_mean": 0.1773,
+      "min_clearance": 4.824
+    },
+    {
+      "goal": [
+        2.0,
+        2.0
+      ],
+      "n": 3,
+      "success": 3,
+      "time_mean": 15.9,
+      "time_std": 0.45,
+      "time_cv": 0.029,
+      "final_dist_mean": 0.553,
+      "speed_mean": 0.1872,
+      "min_clearance": 2.611
+    },
+    {
+      "goal": [
+        2.5,
+        1.5
+      ],
+      "n": 3,
+      "success": 3,
+      "time_mean": 16.63,
+      "time_std": 0.08,
+      "time_cv": 0.005,
+      "final_dist_mean": 0.414,
+      "speed_mean": 0.1881,
+      "min_clearance": 2.506
+    },
+    {
+      "goal": [
+        3.0,
+        -2.0
+      ],
+      "n": 3,
+      "success": 3,
+      "time_mean": 26.52,
+      "time_std": 0.52,
+      "time_cv": 0.02,
+      "final_dist_mean": 0.527,
+      "speed_mean": 0.1452,
+      "min_clearance": 4.654
+    },
+    {
+      "goal": [
+        3.0,
+        -0.5
+      ],
+      "n": 3,
+      "success": 3,
+      "time_mean": 18.14,
+      "time_std": 1.81,
+      "time_cv": 0.1,
+      "final_dist_mean": 0.293,
+      "speed_mean": 0.181,
+      "min_clearance": 3.525
+    }
+  ]
+}
