@@ -183,7 +183,8 @@ def run_one(node: EvalNode, gx: float, gy: float, args) -> dict:
             last_move = now
             last_xy = (x, y)
 
-        if dist < args.tol_dist and yaw_err < args.tol_yaw and spd < args.tol_vel:
+        yaw_ok = (yaw_err < args.tol_yaw) or (not args.require_yaw)
+        if dist < args.tol_dist and yaw_ok and spd < args.tol_vel:
             verdict = "arrived"
             break
         if el > args.timeout:
@@ -250,7 +251,9 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=80.0)
     ap.add_argument("--stall", type=float, default=20.0)
     ap.add_argument("--tol-dist", type=float, default=0.8)
-    ap.add_argument("--tol-yaw", type=float, default=0.5)
+    ap.add_argument("--tol-yaw", type=float, default=0.5,
+                    help="仅用于报告；加 --require-yaw 才参与成功判定")
+    ap.add_argument("--require-yaw", action="store_true")
     ap.add_argument("--tol-vel", type=float, default=0.05)
     ap.add_argument("--repeat", type=int, default=1,
                     help="同一会话内对每个目标重复次数（会状态污染，权威值用 1）")

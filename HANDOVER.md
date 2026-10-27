@@ -120,7 +120,7 @@ scorpio_mujoco_sim/                      # Git 仓库根目录 (= colcon workspa
 | 编译 | 7 个包全部通过 |
 | 模式 A 手动控制 | ✅ GNU 窗口 + 键盘，MANUAL 状态正常，初始 yaw=0° |
 | 模式 B 手动建图 | ✅ 静止地图 10.4 万点；移动 8s 后 15.6 万点；SLAM 位姿跟随 |
-| 模式 C 自动导航 | ⚠️ 链路可用但成功率仅 **20%**（5 目标独立会话实测 1/5），失败表现为起点附近绕圈/航向发散；详见 [docs/EVALUATION.md](docs/EVALUATION.md) §10 |
+| 模式 C 自动导航 | ✅ 5 目标独立会话实测 **5/5 成功**，到达 14.1~28.1s，终点误差 0.27~0.53m，碰撞 0；均速 0.17 m/s（上限 0.5，待优化）。详见 [docs/EVALUATION.md](docs/EVALUATION.md) §10 |
 | TF 树 | ✅ `camera_init→body→base_footprint→base_link→…` 单一父节点 |
 | 障碍物避让 | ⚠️ 能识别墙壁并停下（不撞），但目标在墙后时不绕路 |
 

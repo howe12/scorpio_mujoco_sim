@@ -394,6 +394,17 @@ class ElevationGridParser:
 # ---------------------------------------------------------------------------
 # PlanManager
 # ---------------------------------------------------------------------------
+def _path_stats(pts, tag: str) -> str:
+    """返回路径的几何摘要，用于诊断折返/异常收缩。"""
+    if not pts:
+        return f"{tag}: <empty>"
+    ln = sum(math.dist(pts[i - 1][:2], pts[i][:2]) for i in range(1, len(pts)))
+    p0, p1 = pts[0], pts[-1]
+    span = math.dist(p0[:2], p1[:2])
+    return (f"{tag}: n={len(pts)} len={ln:.2f}m span={span:.2f}m "
+            f"first=({p0[0]:.2f},{p0[1]:.2f}) last=({p1[0]:.2f},{p1[1]:.2f})")
+
+
 class PlanManager:
     """规划流水线：Kinodynamic A* → 轨迹优化（异步）→ 输出。
 
@@ -575,6 +586,9 @@ class PlanManager:
         # Convert path format: list of (x, y, theta, singular) → list of (x, y, yaw)
         rough = [(float(p[0]), float(p[1]), float(p[2])) for p in path]
         self.last_rough = rough
+        if bool(self._node.get_parameter("debug_trace").value):
+            self._node.get_logger().info(
+                _path_stats(rough, f"ASTAR goal=({goal_x:.2f},{goal_y:.2f})"))
 
         # ---- 异步触发轨迹优化（不阻塞本次规划）----
         if self._optimizer is not None:
@@ -819,6 +833,11 @@ class PlanManager:
             self._node.get_logger().warn(f"traj opt exception: {exc}")
             return
 
+        if bool(self._node.get_parameter("debug_trace").value):
+            geo = [(float(x), float(y)) for x, y, _t, _tt in (res.samples or [])]
+            self._node.get_logger().info(
+                _path_stats(geo, f"OPT ok={res.success} Tf={res.duration:.1f}s"))
+
         with self._opt_lock:
             if res.success and res.samples:
                 self._opt_samples = list(res.samples)
@@ -880,7 +899,12 @@ class PlanManager:
         if remaining < self.optimize_min_remaining:
             return None
 
-        return self._resample_by_arc(pts, self.traj_publish_step)
+        out = self._resample_by_arc(pts, self.traj_publish_step)
+        if bool(self._node.get_parameter("debug_trace").value):
+            self._node.get_logger().info(
+                _path_stats([(x, y) for x, y, _th in out],
+                            f"PUBLISH trimmed_from_idx={idx_min} remaining={remaining:.2f}m"))
+        return out
 
     @staticmethod
     def _resample_by_arc(
@@ -918,10 +942,18 @@ class SebNaverPlannerNode(Node):
         self.declare_parameter("steer_res", 0.3)
         self.declare_parameter("goal_tolerance_dist", 1.0)
         self.declare_parameter("goal_tolerance_yaw", 0.15)
+        # 是否把终点朝向作为「到达」的必要条件。默认 False：
+        # 阿克曼车无法原地旋转（ω = v·tanδ/L，v=0 时 ω=0），末端朝向只能靠
+        # 前进/后退的圆弧慢慢收敛。若把它当硬条件，到点后机器人会为了消掉
+        # 几十度朝向而持续画圈，表现为 80s 超时 + 终点 yaw 偏 160°（实测）。
+        # 需要精确「pose 到达」时置 True，并配合专门的末端对准阶段。
+        self.declare_parameter("require_goal_yaw", False)
         self.declare_parameter("goal_tolerance_vel", 0.05)
         self.declare_parameter("replan_interval", 0.5)
         # ---- 轨迹优化（P2）----
         self.declare_parameter("enable_optimization", True)
+        # 诊断探针（阶段 0 定位绕圈）：打印 A* / 优化器 / 裁剪 三段的首末点与长度
+        self.declare_parameter("debug_trace", False)
         self.declare_parameter("trajectory_dmin", 0.28)
         self.declare_parameter("trajectory_seg_len", 0.9)
         self.declare_parameter("trajectory_max_accel", 1.0)
@@ -947,6 +979,7 @@ class SebNaverPlannerNode(Node):
         self._tol_dist: float = self.get_parameter("goal_tolerance_dist").value
         self._tol_yaw: float = self.get_parameter("goal_tolerance_yaw").value
         self._tol_vel: float = self.get_parameter("goal_tolerance_vel").value
+        self._require_yaw: bool = bool(self.get_parameter("require_goal_yaw").value)
         self._replan_interval: float = self.get_parameter("replan_interval").value
 
         # ---- Internal state ----
@@ -1185,11 +1218,17 @@ class SebNaverPlannerNode(Node):
             odom.twist.twist.linear.x ** 2 + odom.twist.twist.linear.y ** 2
         )
 
-        return (
-            dist < self._tol_dist
-            and yaw_err < self._tol_yaw
-            and speed < self._tol_vel
-        )
+        if dist >= self._tol_dist or speed >= self._tol_vel:
+            return False
+        if not self._require_yaw:
+            # 位置到点且已基本停稳即认为到达；朝向作为质量指标单独报告，
+            # 不再驱动机器人原地画圈。
+            if yaw_err >= self._tol_yaw:
+                self.get_logger().info(
+                    f"Arrived at position; residual yaw {math.degrees(yaw_err):.0f}deg "
+                    f"exceeds tol {math.degrees(self._tol_yaw):.0f}deg (require_goal_yaw=false)")
+            return True
+        return yaw_err < self._tol_yaw
 
     # ------------------------------------------------------------------
     # Path publishing

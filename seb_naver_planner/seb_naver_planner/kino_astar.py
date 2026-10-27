@@ -59,6 +59,16 @@ def _hash_state(x: float, y: float, theta: float) -> int:
     return ((ix * 73856093) ^ (iy * 19349663) ^ (ith * 83492791)) & 0x7FFFFFFF
 
 
+def _safe_sqrt(v: float) -> float:
+    """v<0 时返回 nan 而不是抛 ValueError。
+
+    `_rs_shortest` 的各族公式在某些构型下根号内为负（说明该族无解），
+    原实现只判 `math.isnan`，参数为负会直接抛 `math domain error`，
+    把整个规划回调打断。
+    """
+    return math.sqrt(v) if v >= 0.0 else float("nan")
+
+
 def _normalize_angle(a: float) -> float:
     """Wrap angle to [-π, π]."""
     return (a + math.pi) % (2.0 * math.pi) - math.pi
@@ -91,6 +101,10 @@ class KinoAStarPlanner:
 
         # RS connection threshold
         self.rs_threshold: float = params.get("rs_threshold", 1.5)
+        # Reeds-Shepp 连通解的终点校验容差。_rs_shortest 是手工近似的 6 族公式，
+        # 在斜向构型下会算错（实测 (0,0)->(2,2) 的路径终点偏离 5.22m）。
+        self.rs_endpoint_tol: float = float(params.get("rs_endpoint_tol", 0.10))
+        self.rs_yaw_tol: float = math.radians(float(params.get("rs_yaw_tol_deg", 10.0)))
 
         # Pre-compute steering angles for motion primitives
         self._build_steering_angles()
@@ -482,6 +496,20 @@ class KinoAStarPlanner:
             # Update current pose to end of segment
             cx, cy, cth = path_world[-1][0], path_world[-1][1], path_world[-1][2]
 
+        # ---- 终点校验（关键）----
+        # 上面的族公式是手工近似，斜向目标会算出一条到不了目标的路径。
+        # 若不校验，A* 会把这条错误路径当成 SUCCESS 返回，规划器随后跟踪一条
+        # 终点不在目标上的轨迹 —— 表现就是机器人在起点附近绕圈、航向发散
+        # （实测成功率 20%，全部失败案例的最小间距都 >3.7m，从未接近目标）。
+        # 校验不过就返回 None，让 A* 继续用运动原语扩展（原语解算正确）。
+        if not path_world:
+            return None
+        ex, ey, eth = path_world[-1][0], path_world[-1][1], path_world[-1][2]
+        pos_err = math.hypot(ex - x1, ey - y1)
+        yaw_err = abs(_normalize_angle(eth - th1))
+        if pos_err > self.rs_endpoint_tol or yaw_err > self.rs_yaw_tol:
+            return None
+
         return path_world
 
     def _rs_shortest(
@@ -506,8 +534,8 @@ class KinoAStarPlanner:
         tau, omega = self._tau_omega(xi, eta, ph)
         if tau is not None:
             # L+S+L+
-            p = math.sqrt(xi * xi + eta * eta + 2.0 * xi * math.sin(ph)
-                          - 2.0 * eta * math.cos(ph) + 2.0 - 2.0 * math.cos(ph - tau + omega))
+            p = _safe_sqrt(xi * xi + eta * eta + 2.0 * xi * math.sin(ph)
+                           - 2.0 * eta * math.cos(ph) + 2.0 - 2.0 * math.cos(ph - tau + omega))
             if not math.isnan(p):
                 candidates.append((abs(tau) + abs(p) + abs(omega),
                                    [('L', tau * r), ('S', p * r), ('L', omega * r)]))
@@ -515,8 +543,8 @@ class KinoAStarPlanner:
         # R+S+R+
         tau2, omega2 = self._tau_omega(-xi, -eta, -ph)
         if tau2 is not None:
-            p2 = math.sqrt(xi * xi + eta * eta - 2.0 * xi * math.sin(ph)
-                           + 2.0 * eta * math.cos(ph) + 2.0 - 2.0 * math.cos(ph - tau2 + omega2))
+            p2 = _safe_sqrt(xi * xi + eta * eta - 2.0 * xi * math.sin(ph)
+                            + 2.0 * eta * math.cos(ph) + 2.0 - 2.0 * math.cos(ph - tau2 + omega2))
             if not math.isnan(p2):
                 candidates.append((abs(tau2) + abs(p2) + abs(omega2),
                                    [('R', -tau2 * r), ('S', -p2 * r), ('R', -omega2 * r)]))

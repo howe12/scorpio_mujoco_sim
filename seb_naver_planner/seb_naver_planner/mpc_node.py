@@ -7,6 +7,7 @@ Discrete bicycle model with state [x, y, theta] and control [v, delta].
 """
 
 import math
+import time
 from typing import List, Optional, Tuple
 
 import casadi as ca
@@ -39,6 +40,12 @@ class MPCController(Node):
         self.max_speed: float = self.get_parameter('max_speed').value
         self.min_speed: float = self.get_parameter('min_speed').value
         self.max_steer: float = self.get_parameter('max_steer').value
+        # 诊断探针（阶段 0 定位绕圈用）。默认关；运行时可用
+        #   ros2 param set /mpc_controller debug_trace true
+        # 打开，按 debug_period 打印参考/控制量的关键中间量。
+        self.declare_parameter('debug_trace', False)
+        self.declare_parameter('debug_period', 0.5)
+
         self.N: int = self.get_parameter('N_horizon').value
         self.dt: float = self.get_parameter('dt').value
 
@@ -195,6 +202,14 @@ class MPCController(Node):
                                1.0 - 2.0 * (qy * qy + qz * qz))
             points.append((px, py, theta))
         self.ref_trajectory = points
+        if bool(self.get_parameter('debug_trace').value):
+            n = len(points)
+            if n:
+                p0, p1 = points[0], points[-1]
+                self.get_logger().info(
+                    "TRACE_REF n=%d first=(%.2f,%.2f,%.0fdeg) last=(%.2f,%.2f,%.0fdeg)"
+                    % (n, p0[0], p0[1], math.degrees(p0[2]),
+                       p1[0], p1[1], math.degrees(p1[2])))
 
     def _find_closest_index(self, state: np.ndarray) -> int:
         """Find index of closest point in reference trajectory to current state."""
@@ -303,6 +318,44 @@ class MPCController(Node):
             self.get_logger().warn(f'MPC solver failed: {e}')
             return None
 
+    def _trace(self, X_ref, u_opt, v_cmd, delta_cmd) -> None:
+        """按 debug_period 打印定位绕圈所需的中间量。"""
+        if not bool(self.get_parameter('debug_trace').value):
+            return
+        now = time.time()
+        period = float(self.get_parameter('debug_period').value)
+        if now - getattr(self, '_trace_t', 0.0) < period:
+            return
+        self._trace_t = now
+
+        st = self.current_state
+        traj = self.ref_trajectory or []
+        traj_len = len(traj)
+        start_idx = self._find_closest_index(st) if traj_len else -1
+        end = X_ref[-1]
+        d_end = math.hypot(end[0] - st[0], end[1] - st[1])
+        # 参考点相对机器人车体系的分布：正=前方, 负=后方
+        cy, sy = math.cos(st[2]), math.sin(st[2])
+        fwd, lat = [], []
+        for k in range(len(X_ref)):
+            dx = X_ref[k, 0] - st[0]
+            dy = X_ref[k, 1] - st[1]
+            fwd.append(cy * dx + sy * dy)
+            lat.append(-sy * dx + cy * dy)
+        u0 = u_opt[0] if u_opt is not None else [float('nan'), float('nan')]
+        self.get_logger().info(
+            "TRACE st=(%.2f,%.2f,%.0fdeg) traj_len=%d idx=%d "
+            "ref0=(%.2f,%.2f,%.0fdeg) refEnd=(%.2f,%.2f,%.0fdeg) dEnd=%.2f "
+            "fwd[0,mid,last]=(%.2f,%.2f,%.2f) lat_absmax=%.2f "
+            "u_opt=(%.3f,%.3f) out=(%.3f,%.3f) w=%.3f"
+            % (st[0], st[1], math.degrees(st[2]), traj_len, start_idx,
+               X_ref[0, 0], X_ref[0, 1], math.degrees(X_ref[0, 2]),
+               end[0], end[1], math.degrees(end[2]), d_end,
+               fwd[0], fwd[len(fwd) // 2], fwd[-1],
+               max(abs(x) for x in lat),
+               u0[0], u0[1], v_cmd, delta_cmd,
+               v_cmd * math.tan(delta_cmd) / self.wheelbase))
+
     def _publish_zero_velocity(self) -> None:
         """Publish zero velocity command."""
         twist = Twist()
@@ -376,6 +429,8 @@ class MPCController(Node):
         twist.linear.x = v_cmd
         twist.angular.z = omega_cmd
         self.cmd_pub.publish(twist)
+
+        self._trace(X_ref, u_opt, v_cmd, delta_cmd)
 
         # Store solution for warm-starting next iteration
         self.prev_u = u_opt.copy()
